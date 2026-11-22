@@ -34,6 +34,7 @@ fun ResultRow.toTrainer() = Trainer(
     approvedAt = this[Trainers.approvedAt],
     trainingBotLinkedAt = this[Trainers.trainingBotLinkedAt],
     signupTelegramInUse = this[Trainers.signupTelegramInUse],
+    deactivatedAt = this[Trainers.deactivatedAt],
 )
 
 fun ResultRow.toClient() = Client(
@@ -64,6 +65,7 @@ fun ResultRow.toExerciseCatalogItem() = ExerciseCatalogItem(
     muscleGroupId = this[ExerciseCatalog.muscleGroupId]?.value,
     name = this[ExerciseCatalog.name],
     description = this[ExerciseCatalog.description],
+    hidden = this[ExerciseCatalog.hidden],
 )
 
 fun ResultRow.toWorkoutSession() = WorkoutSession(

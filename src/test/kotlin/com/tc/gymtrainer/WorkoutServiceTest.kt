@@ -1,7 +1,7 @@
 package com.tc.gymtrainer
 
 import com.tc.gymtrainer.domain.ExerciseDraft
-import com.tc.gymtrainer.domain.MuscleGroup
+import com.tc.gymtrainer.service.CatalogEdit
 import com.tc.gymtrainer.domain.SetDraft
 import com.tc.gymtrainer.domain.WorkoutDraft
 import com.tc.gymtrainer.domain.WorkoutStage
@@ -37,7 +37,7 @@ class WorkoutServiceTest : AbstractDbTest() {
         assertTrue(first != independent.id)
         assertThrows(AccessDeniedException::class.java) { runBlocking { workouts.finishWorkout(otherTrainer.id, first) } }
         assertThrows(AccessDeniedException::class.java) { runBlocking { workouts.startOrResume(otherTrainer.id, client.id) } }
-        val catalogItem = Services.catalog.addExercise(trainer.id, name = "Отжимания")
+        val catalogItem = Services.catalog.saveExercise(null, CatalogEdit("Отжимания"))
         workouts.selectExercise(trainer.id, first, catalogItem.id)
         val ex = workouts.getDetail(trainer.id, first).exercises.single().exercise.id
         assertThrows(ValidationException::class.java) {
@@ -59,14 +59,18 @@ class WorkoutServiceTest : AbstractDbTest() {
         assertEquals(independent.id, workouts.activeForClient(trainer.id, otherClient.id)?.id)
     }
 
-    private suspend fun mg(name: String): MuscleGroup =
-        Services.catalog.listMuscleGroups().first { it.name == name }
+    @org.junit.jupiter.api.BeforeEach
+    fun publishExercises() {
+        runBlocking { listOf("Жим штанги лёжа", "Подтягивания", "Гакк-присед (новое)", "Приседания со штангой").forEach {
+            Services.catalog.saveExercise(null, CatalogEdit(it))
+        } }
+    }
 
     private fun at(year: Int, month: Int, day: Int): OffsetDateTime =
         OffsetDateTime.of(year, month, day, 10, 0, 0, 0, ZoneOffset.UTC)
 
     @Test
-    fun `create workout stores exercises, ordered sets and registers new exercise`() = runBlocking {
+    fun `create workout stores exercises, ordered sets from the shared catalog`() = runBlocking {
         val trainer = newTrainer(2001)
         val client = newClient(trainer)
         val draft = WorkoutDraft(
@@ -76,11 +80,11 @@ class WorkoutServiceTest : AbstractDbTest() {
             note = "лёгкая",
             exercises = listOf(
                 ExerciseDraft(
-                    mg("Грудь").id, null, "Жим штанги лёжа", null,
+                    null, null, "Жим штанги лёжа", null,
                     listOf(SetDraft(BigDecimal("60"), 10), SetDraft(BigDecimal("60"), 8)),
                 ),
                 ExerciseDraft(
-                    mg("Ноги").id, null, "Гакк-присед (новое)", null,
+                    null, null, "Гакк-присед (новое)", null,
                     listOf(SetDraft(null, 12)),
                 ),
             ),
@@ -92,8 +96,7 @@ class WorkoutServiceTest : AbstractDbTest() {
         assertEquals(listOf(0, 1), detail.exercises.map { it.exercise.orderIndex })
         assertEquals(listOf(1, 2), detail.exercises[0].sets.map { it.setNumber })
         assertNull(detail.exercises[1].sets[0].weightKg) // вес тела
-        // новое упражнение попало в справочник
-        assertNotNull(Services.catalog.suggest(trainer.id, "Гакк-присед").firstOrNull())
+        assertNotNull(Services.catalog.exercises().firstOrNull { it.name.startsWith("Гакк-присед") })
     }
 
     @Test
@@ -105,8 +108,8 @@ class WorkoutServiceTest : AbstractDbTest() {
             WorkoutDraft(
                 client.id, at(2026, 1, 10), null, null,
                 listOf(
-                    ExerciseDraft(mg("Грудь").id, null, "Жим штанги лёжа", null, listOf(SetDraft(BigDecimal("60"), 10))),
-                    ExerciseDraft(mg("Спина").id, null, "Подтягивания", null, listOf(SetDraft(null, 8))),
+                    ExerciseDraft(null, null, "Жим штанги лёжа", null, listOf(SetDraft(BigDecimal("60"), 10))),
+                    ExerciseDraft(null, null, "Подтягивания", null, listOf(SetDraft(null, 8))),
                 ),
             ),
         )
@@ -145,14 +148,14 @@ class WorkoutServiceTest : AbstractDbTest() {
             trainer.id,
             WorkoutDraft(
                 client.id, at(2026, 1, 15), null, null,
-                listOf(ExerciseDraft(mg("Грудь").id, null, "Жим штанги лёжа", null, listOf(SetDraft(BigDecimal("50"), 10)))),
+                listOf(ExerciseDraft(null, null, "Жим штанги лёжа", null, listOf(SetDraft(BigDecimal("50"), 10)))),
             ),
         )
         Services.workout.create(
             trainer.id,
             WorkoutDraft(
                 client.id, at(2026, 6, 20), null, null,
-                listOf(ExerciseDraft(mg("Ноги").id, null, "Приседания со штангой", null, listOf(SetDraft(BigDecimal("100"), 5)))),
+                listOf(ExerciseDraft(null, null, "Приседания со штангой", null, listOf(SetDraft(BigDecimal("100"), 5)))),
             ),
         )
 
@@ -177,7 +180,7 @@ class WorkoutServiceTest : AbstractDbTest() {
             trainer.id,
             WorkoutDraft(
                 client.id, OffsetDateTime.now(), null, null,
-                listOf(ExerciseDraft(mg("Грудь").id, null, "Жим штанги лёжа", null, listOf(SetDraft(BigDecimal("60"), 10)))),
+                listOf(ExerciseDraft(null, null, "Жим штанги лёжа", null, listOf(SetDraft(BigDecimal("60"), 10)))),
             ),
         )
         val setId = detail.exercises[0].sets[0].id
@@ -204,7 +207,7 @@ class WorkoutServiceTest : AbstractDbTest() {
             trainer.id,
             WorkoutDraft(
                 client.id, OffsetDateTime.now(), null, null,
-                listOf(ExerciseDraft(mg("Грудь").id, null, "Жим штанги лёжа", null, listOf(SetDraft(BigDecimal("60"), 10)))),
+                listOf(ExerciseDraft(null, null, "Жим штанги лёжа", null, listOf(SetDraft(BigDecimal("60"), 10)))),
             ),
         )
         Services.workout.deleteSession(trainer.id, detail.session.id)
@@ -222,7 +225,7 @@ class WorkoutServiceTest : AbstractDbTest() {
                     trainer.id,
                     WorkoutDraft(
                         client.id, OffsetDateTime.now(), null, null,
-                        listOf(ExerciseDraft(mg("Грудь").id, null, "Жим штанги лёжа", null, listOf(SetDraft(BigDecimal("60"), 0)))),
+                        listOf(ExerciseDraft(null, null, "Жим штанги лёжа", null, listOf(SetDraft(BigDecimal("60"), 0)))),
                     ),
                 )
             }
@@ -239,7 +242,7 @@ class WorkoutServiceTest : AbstractDbTest() {
             owner.id,
             WorkoutDraft(
                 client.id, OffsetDateTime.now(), null, null,
-                listOf(ExerciseDraft(mg("Грудь").id, null, "Жим штанги лёжа", null, listOf(SetDraft(BigDecimal("60"), 10)))),
+                listOf(ExerciseDraft(null, null, "Жим штанги лёжа", null, listOf(SetDraft(BigDecimal("60"), 10)))),
             ),
         )
         assertThrows(AccessDeniedException::class.java) {

@@ -23,10 +23,13 @@ data class BotAccess(val authKey: String = "", val trainingKey: String = "") {
     }
 }
 
+class AdminAccess(val login: String = "", val password: String = "")
+
 data class AppConfig(
     val database: DatabaseConfig,
     val server: ServerConfig,
     val bots: BotAccess = BotAccess(),
+    val admin: AdminAccess = AdminAccess(),
 ) {
     companion object {
         fun load(raw: Config = ConfigFactory.load()): AppConfig {
@@ -38,6 +41,7 @@ data class AppConfig(
                     password = c.getString("db.password"),
                     maxPoolSize = c.getInt("db.maxPoolSize"),
                 ),
+                admin = AdminAccess(c.getString("admin.login"), c.getString("admin.password")),
                 bots = BotAccess(c.getString("bots.authKey"), c.getString("bots.trainingKey")),
                 server = ServerConfig(
                     host = c.getString("server.host"),

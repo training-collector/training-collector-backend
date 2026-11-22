@@ -51,7 +51,7 @@ class TelegramLoginTest : AbstractDbTest() {
         val other = link(second.id)
         assertEquals(SignupConfirmation.TELEGRAM_IN_USE, services.telegramLinks.confirmSignup(other, 123))
         assertEquals(first.id, services.trainers.findByTelegramUserId(123)?.id)
-        assertEquals(SignupConfirmation.LINKED, services.telegramLinks.confirmSignup(other, 345))
+        assertEquals(SignupConfirmation.PENDING_APPROVAL, services.telegramLinks.confirmSignup(other, 345))
         assertFalse(services.trainers.findByTelegramUserId(345)!!.signupTelegramInUse)
     }
 
@@ -61,9 +61,9 @@ class TelegramLoginTest : AbstractDbTest() {
         val accounts = listOf("one", "two").map { services.trainers.registerForWeb(it, "Имя", "Фамилия") }
         val links = accounts.map { services.telegramLinks.createSignupLink(it.trainer.id).url.substringAfter("?start=") }
         val results = links.map { async { services.telegramLinks.confirmSignup(it, 123) } }.awaitAll()
-        assertEquals(setOf(SignupConfirmation.LINKED, SignupConfirmation.TELEGRAM_IN_USE), results.toSet())
+        assertEquals(setOf(SignupConfirmation.PENDING_APPROVAL, SignupConfirmation.TELEGRAM_IN_USE), results.toSet())
         val duplicate = accounts[results.indexOf(SignupConfirmation.TELEGRAM_IN_USE)]
-        val original = accounts[results.indexOf(SignupConfirmation.LINKED)]
+        val original = accounts[results.indexOf(SignupConfirmation.PENDING_APPROVAL)]
         val pending = services.trainers.authenticate(duplicate.token)!!
         assertTrue(pending.signupTelegramInUse)
         assertNull(pending.telegramUserId)
@@ -71,6 +71,27 @@ class TelegramLoginTest : AbstractDbTest() {
         assertFalse(services.trainers.authenticate(original.token)!!.signupTelegramInUse)
         services.trainers.logout(duplicate.token)
         assertEquals(original.trainer.id, services.trainers.findByTelegramUserId(123)!!.id)
+    }
+
+    @Test
+    fun `approval after the signup link expires schedules a single fresh code`() = runBlocking<Unit> {
+        BotRole.LOGIN_CODES.record("codes_bot")
+        val account = services.trainers.registerForWeb("long_wait", "Анна", "Тест")
+        val link = services.telegramLinks.createSignupLink(account.trainer.id)
+        assertTrue(services.admin.trainers().isEmpty())
+        services.telegramLinks.confirmSignup(link.url.substringAfter("?start="), 123)
+        dbQuery { TelegramLinks.update { it[expiresAt] = OffsetDateTime.now().minusDays(2) } }
+        assertNull(services.loginCodes.nextDelivery())
+        List(2) { async { services.admin.approve(account.trainer.id) } }.awaitAll()
+        val job = services.loginCodes.nextDelivery()!!
+        val challenge = services.loginCodes.request("long_wait")
+        assertEquals(job.challenge, challenge.challenge)
+        assertTrue(challenge.expiresAt > OffsetDateTime.now().plusMinutes(4))
+        assertNull(services.loginCodes.nextDelivery())
+        assertTrue(services.loginCodes.prepareDelivery(job.challenge, "123456"))
+        assertEquals(account.trainer.id, services.loginCodes.verify(job.challenge, "123456").trainer.id)
+        val next = services.loginCodes.request("long_wait")
+        assertEquals(next.challenge, services.loginCodes.nextDelivery()!!.challenge)
     }
 
     @Test
@@ -84,14 +105,20 @@ class TelegramLoginTest : AbstractDbTest() {
         assertNull(codes.nextDelivery())
         assertNotEquals(first.challenge, codes.request("first").challenge)
         services.telegramLinks.confirmSignup(second.url.substringAfter("?start="), 222)
-        assertEquals(CodeDelivery(second.challenge, 222), codes.nextDelivery())
-        codes.prepareDelivery(second.challenge, "222222")
+        assertNull(codes.nextDelivery())
+        services.admin.approve(services.trainers.findByTelegramUserId(222)!!.id)
+        val secondCode = codes.request("second").challenge
+        assertEquals(CodeDelivery(secondCode, 222), codes.nextDelivery())
+        codes.prepareDelivery(secondCode, "222222")
         services.telegramLinks.confirmSignup(first.url.substringAfter("?start="), 111)
-        assertEquals(CodeDelivery(first.challenge, 111), codes.nextDelivery())
-        codes.prepareDelivery(first.challenge, "111111")
-        assertThrows(LoginException::class.java) { runBlocking { codes.verify(first.challenge, "222222") } }
-        assertEquals("first", codes.verify(first.challenge, "111111").trainer.username)
-        assertEquals("second", codes.verify(second.challenge, "222222").trainer.username)
+        assertNull(codes.nextDelivery())
+        services.admin.approve(services.trainers.findByTelegramUserId(111)!!.id)
+        val firstCode = codes.request("first").challenge
+        assertEquals(CodeDelivery(firstCode, 111), codes.nextDelivery())
+        codes.prepareDelivery(firstCode, "111111")
+        assertThrows(LoginException::class.java) { runBlocking { codes.verify(firstCode, "222222") } }
+        assertEquals("first", codes.verify(firstCode, "111111").trainer.username)
+        assertEquals("second", codes.verify(secondCode, "222222").trainer.username)
     }
 
     @Test
@@ -101,6 +128,7 @@ class TelegramLoginTest : AbstractDbTest() {
         val codes = services.loginCodes
         BotRole.LOGIN_CODES.record("auth_test_bot")
         links.confirmSignup(links.createSignupLink(account.trainer.id).url.substringAfter("?start="), 123)
+        services.admin.approve(account.trainer.id)
         val id = codes.request("coach").challenge
         codes.prepareDelivery(id, "000123")
         repeat(5) { assertThrows(LoginException::class.java) { runBlocking { codes.verify(id, "111111") } } }

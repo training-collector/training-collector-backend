@@ -59,7 +59,10 @@ internal fun Route.botRoutes(services: TrainingServices) {
                 call.respond(mapOf("status" to services.telegramLinks.confirmSignup(input.token, input.sender)))
             }
             post("/chats/{sender}/activate") {
-                call.respond(mapOf("active" to services.loginCodes.activateChat(call.id("sender"))))
+                val sender = call.id("sender")
+                val trainer = services.trainers.findByTelegramUserId(sender)
+                val pending = trainer?.telegramLinkedAt != null && trainer.approvedAt == null && trainer.deactivatedAt == null
+                call.respond(mapOf("active" to services.loginCodes.activateChat(sender), "pending" to pending, "deactivated" to (trainer?.deactivatedAt != null)))
             }
             post("/deliveries/next") { call.optional(services.loginCodes.nextDelivery()) }
             post("/deliveries/prepare") {
@@ -91,7 +94,7 @@ internal fun Route.botRoutes(services: TrainingServices) {
                 clientRoutes(services.clients)
                 workoutRoutes(services.workouts)
                 measurementRoutes(services.measurements)
-                get("/catalog/exercises/{id}") { call.respond(services.catalog.getExercise(call.trainer.id, call.id("id"))) }
+                get("/catalog/exercises/{id}") { call.respond(services.catalog.getExercise(call.id("id"))) }
                 post("/clients/profile") {
                     val input = call.receive<NewClient>()
                     call.respond(services.clients.create(call.trainer.id, input.profile, input.measurement))

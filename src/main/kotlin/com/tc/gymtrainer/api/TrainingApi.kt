@@ -6,8 +6,9 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.KotlinFeature
 import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.tc.gymtrainer.TrainingServices
+import com.tc.gymtrainer.config.AdminAccess
+import com.tc.gymtrainer.service.AdminAuth
 import com.tc.gymtrainer.domain.ExerciseDraft
-import com.tc.gymtrainer.domain.Goal
 import com.tc.gymtrainer.domain.MeasurementInput
 import com.tc.gymtrainer.domain.SetDraft
 import com.tc.gymtrainer.domain.Trainer
@@ -57,9 +58,7 @@ private data class TrainerInput(val username: String, val firstName: String, val
 private data class LoginInput(val username: String)
 private data class VerifyCodeInput(val challenge: String, val code: String)
 private data class ReplaceTokenInput(val newToken: String)
-private data class ClientInput(val fullName: String, val phone: String? = null, val goal: Goal? = null, val notes: String? = null)
-private data class CatalogExerciseInput(val name: String, val muscleGroupId: Long? = null, val description: String? = null)
-private data class EditCatalogExerciseInput(val name: String, val description: String? = null)
+private data class ClientInput(val fullName: String, val phone: String? = null, val goal: String? = null, val notes: String? = null)
 private data class ExerciseInput(
     val muscleGroupId: Long? = null,
     val exerciseName: String? = null,
@@ -103,7 +102,8 @@ private fun ApplicationCall.instant(name: String): OffsetDateTime? =
         }
     }
 
-fun Application.trainingApi(services: TrainingServices, keys: BotAccess) {
+fun Application.trainingApi(services: TrainingServices, keys: BotAccess, admin: AdminAccess = AdminAccess()) {
+    val adminAuth = AdminAuth(admin)
     install(createApplicationPlugin("PrivateApiResponses") {
         onCall { call -> call.response.header(HttpHeaders.CacheControl, "no-store") }
     })
@@ -129,6 +129,7 @@ fun Application.trainingApi(services: TrainingServices, keys: BotAccess) {
         exception<BotUnavailableException> { call, e -> call.respond(HttpStatusCode.ServiceUnavailable, mapOf("error" to e.message)) }
     }
     install(Authentication) {
+        bearer("admin") { authenticate { if (adminAuth.valid(it.token)) it.token else null } }
         botAuthentication(keys, services)
         bearer("trainer") {
             realm = "Training API"
@@ -136,6 +137,7 @@ fun Application.trainingApi(services: TrainingServices, keys: BotAccess) {
         }
     }
     routing {
+        adminRoutes(services, adminAuth)
         botRoutes(services)
         get("/health") { call.respondText("OK") }
         route("/api/v1") {
@@ -198,18 +200,9 @@ private fun Route.trainingRoutes(services: TrainingServices) {
 
 internal fun Route.catalogRoutes(services: TrainingServices) {
     get("/catalog/muscle-groups") { call.respond(services.catalog.listMuscleGroups()) }
-    get("/catalog/muscle-groups/{groupId}/exercises") {
-        call.respond(services.catalog.exercisesFor(call.trainer.id, call.id("groupId")))
-    }
-    get("/catalog/exercises") { call.respond(services.catalog.exercisesFor(call.trainer.id)) }
-    post("/catalog/exercises") {
-        val input = call.receive<CatalogExerciseInput>()
-        call.respond(services.catalog.addExercise(call.trainer.id, input.muscleGroupId, input.name, input.description))
-    }
-    put("/catalog/exercises/{id}") {
-        val input = call.receive<EditCatalogExerciseInput>()
-        call.respond(services.catalog.updateExercise(call.trainer.id, call.id("id"), input.name, input.description))
-    }
+    get("/catalog/muscle-groups/{groupId}/exercises") { call.respond(services.catalog.exercises(call.id("groupId"))) }
+    get("/catalog/exercises") { call.respond(services.catalog.exercises()) }
+    get("/catalog/goals") { call.respond(services.catalog.goals()) }
 }
 
 internal fun Route.clientRoutes(clients: ClientService) {

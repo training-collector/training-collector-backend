@@ -4,7 +4,6 @@ import com.tc.gymtrainer.domain.Client
 import com.tc.gymtrainer.domain.Trainer
 import com.tc.gymtrainer.db.dbQuery
 import java.time.OffsetDateTime
-import com.tc.gymtrainer.repository.CatalogRepository
 import com.tc.gymtrainer.repository.ClientRepository
 import com.tc.gymtrainer.repository.MeasurementRepository
 import com.tc.gymtrainer.repository.TrainerRepository
@@ -19,7 +18,7 @@ import com.tc.gymtrainer.service.WorkoutService
 object Services {
     val trainer = TrainerService(TrainerRepository())
     val client = ClientService(ClientRepository(), WorkoutRepository(), MeasurementRepository())
-    val catalog = CatalogService(CatalogRepository())
+    val catalog = CatalogService()
     val workout = WorkoutService(WorkoutRepository(), ClientRepository(), catalog)
     val measurement = MeasurementService(MeasurementRepository(), ClientRepository())
 }

@@ -20,14 +20,24 @@ class MigrationUpgradeTest {
                 // Reconstruct the immediately preceding versioned installation in this test schema.
                 sql.execute("UPDATE training_schema_history SET version = '1', script = 'V1__training_collector.sql' WHERE type = 'SQL'")
                 sql.execute("ALTER TABLE body_measurement DROP COLUMN back_width_cm")
-                sql.execute("ALTER TABLE exercise_catalog DROP COLUMN description")
+                sql.execute("ALTER TABLE exercise_catalog DROP COLUMN description, ADD COLUMN trainer_id BIGINT REFERENCES trainer(id)")
+                sql.execute("ALTER TABLE client ALTER COLUMN goal TYPE varchar(32)")
                 sql.execute("ALTER TABLE workout_session DROP COLUMN stage")
                 sql.execute("INSERT INTO trainer(full_name) VALUES ('Тренер')")
-                sql.execute("INSERT INTO client(trainer_id, full_name) VALUES (1, 'Клиент')")
+                sql.execute("INSERT INTO client(trainer_id, full_name, goal) VALUES (1, 'Клиент', 'WEIGHT_LOSS')")
+                sql.execute("INSERT INTO exercise_catalog(trainer_id, name) VALUES (1, 'Личное упражнение')")
                 sql.execute("INSERT INTO body_measurement(client_id, measured_on, left_forearm_cm) VALUES (1, CURRENT_DATE, 28)")
                 sql.execute("INSERT INTO workout_session(client_id, trainer_id, performed_at) VALUES (1, 1, now())")
                 assertEquals(1, flyway.migrate().migrationsExecuted)
-                sql.execute("INSERT INTO exercise_catalog(trainer_id, name, description) VALUES (1, 'Жим', 'Лёжа на скамье')")
+                sql.execute("INSERT INTO exercise_catalog(name, description) VALUES ( 'Жим', 'Лёжа на скамье')")
+                sql.executeQuery("SELECT hidden FROM exercise_catalog WHERE name = 'Личное упражнение'").use {
+                    assertTrue(it.next() && it.getBoolean(1))
+                }
+                sql.executeQuery("SELECT goal FROM client WHERE id = 1").use {
+                    assertTrue(it.next())
+                    assertEquals("Похудение", it.getString(1))
+                }
+                sql.executeQuery("SELECT count(*) FROM goal_catalog").use { assertTrue(it.next() && it.getInt(1) == 0) }
                 sql.execute("UPDATE body_measurement SET back_width_cm = 39")
                 sql.execute("INSERT INTO workout_session(client_id, trainer_id, performed_at, stage) VALUES (1, 1, now(), 'CHOOSE_EXERCISE')")
                 // A later edit of the repeatable script must also be safe on a populated database.
@@ -89,14 +99,14 @@ class MigrationUpgradeTest {
                     assertEquals(3, rows.getInt(1))
                 }
                 sql.executeQuery("""
-                    SELECT e.exercise_name, c.name, s.trainer_id, c.trainer_id, e.muscle_group_id, c.muscle_group_id
+                    SELECT e.exercise_name, c.name, s.trainer_id, c.hidden, e.muscle_group_id, c.muscle_group_id
                     FROM workout_exercise e JOIN workout_session s ON s.id = e.session_id
                     JOIN exercise_catalog c ON c.id = e.exercise_catalog_id
                 """.trimIndent()).use { rows ->
                     var count = 0
                     while (rows.next()) {
                         assertEquals(rows.getString(1), rows.getString(2))
-                        assertEquals(rows.getLong(3), rows.getLong(4))
+                        assertTrue(rows.getBoolean(4))
                         assertEquals(rows.getLong(5), rows.getLong(6))
                         count++
                     }

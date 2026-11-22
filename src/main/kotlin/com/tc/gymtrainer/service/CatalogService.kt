@@ -1,61 +1,93 @@
 package com.tc.gymtrainer.service
 
-import com.tc.gymtrainer.db.dbQuery
+import com.tc.gymtrainer.db.*
 import com.tc.gymtrainer.domain.ExerciseCatalogItem
-import com.tc.gymtrainer.domain.MuscleGroup
-import com.tc.gymtrainer.repository.CatalogRepository
+import com.tc.gymtrainer.repository.toExerciseCatalogItem
+import com.tc.gymtrainer.repository.toMuscleGroup
+import org.jetbrains.exposed.exceptions.ExposedSQLException
+import org.jetbrains.exposed.sql.*
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 
-/** Личный список упражнений тренера. */
-class CatalogService(private val catalog: CatalogRepository) {
+data class GoalItem(val id: Long, val name: String, val hidden: Boolean)
+data class CatalogEdit(val name: String, val description: String? = null, val hidden: Boolean = false)
 
-    suspend fun listMuscleGroups(): List<MuscleGroup> =
-        dbQuery { catalog.listMuscleGroups() }
+class CatalogService {
+    suspend fun listMuscleGroups() = dbQuery { MuscleGroups.selectAll().orderBy(MuscleGroups.id).map { it.toMuscleGroup() } }
 
-    suspend fun exercisesFor(trainerId: Long, muscleGroupId: Long? = null): List<ExerciseCatalogItem> = dbQuery {
-        if (muscleGroupId != null && catalog.findMuscleGroupById(muscleGroupId) == null) {
-            throw NotFoundException("Группа мышц не найдена.")
+    suspend fun exercises(muscleGroupId: Long? = null, includeHidden: Boolean = false) = dbQuery {
+        val rows = ExerciseCatalog.selectAll()
+        if (!includeHidden) rows.andWhere { ExerciseCatalog.hidden eq false }
+        if (muscleGroupId != null) rows.andWhere { ExerciseCatalog.muscleGroupId eq muscleGroupId }
+        rows.orderBy(ExerciseCatalog.name.lowerCase(), order = SortOrder.ASC).orderBy(ExerciseCatalog.id).map { it.toExerciseCatalogItem() }
+    }
+
+    suspend fun getExercise(id: Long) = dbQuery { resolveExercise(id, null) }
+
+    internal fun resolveExercise(id: Long?, name: String?): ExerciseCatalogItem {
+        val rows = ExerciseCatalog.selectAll().where { ExerciseCatalog.hidden eq false }
+        if (id != null) rows.andWhere { ExerciseCatalog.id eq id }
+        else rows.andWhere { ExerciseCatalog.name.lowerCase() eq stringParam(name.orEmpty().trim()).lowerCase() }
+        return rows.forUpdate().singleOrNull()?.toExerciseCatalogItem()
+            ?: throw NotFoundException("Выберите доступное упражнение из справочника.")
+    }
+
+    suspend fun saveExercise(id: Long?, edit: CatalogEdit) = uniqueName {
+        val name = validName(edit.name, 255)
+        val description = edit.description?.trim()?.ifEmpty { null }
+        val saved = if (id == null) ExerciseCatalog.insertAndGetId {
+            it[ExerciseCatalog.name] = name
+            it[ExerciseCatalog.description] = description
+            it[hidden] = edit.hidden
+        }.value else {
+            if (ExerciseCatalog.update({ ExerciseCatalog.id eq id }) {
+                it[ExerciseCatalog.name] = name
+                it[ExerciseCatalog.description] = description
+                it[hidden] = edit.hidden
+            } == 0) throw NotFoundException("Упражнение не найдено.")
+            id
         }
-        catalog.listExercises(trainerId, muscleGroupId)
+        ExerciseCatalog.selectAll().where { ExerciseCatalog.id eq saved }.single().toExerciseCatalogItem()
     }
 
-    /** Подсказки упражнений по вводимой подстроке (для автоподстановки). */
-    suspend fun suggest(trainerId: Long, query: String, muscleGroupId: Long? = null, limit: Int = 10): List<ExerciseCatalogItem> = dbQuery {
-        if (query.isBlank() && muscleGroupId == null) emptyList()
-        else catalog.listExercises(trainerId, muscleGroupId, query.trim(), limit)
+    suspend fun deleteExercise(id: Long) = dbQuery {
+        ExerciseCatalog.select(ExerciseCatalog.id).where { ExerciseCatalog.id eq id }.forUpdate().singleOrNull()
+            ?: throw NotFoundException("Упражнение не найдено.")
+        WorkoutExercises.update({ WorkoutExercises.exerciseCatalogId eq id }) { it[exerciseCatalogId] = null }
+        ExerciseCatalog.deleteWhere { ExerciseCatalog.id eq id }
     }
 
-    suspend fun getExercise(trainerId: Long, id: Long): ExerciseCatalogItem = dbQuery {
-        catalog.findExercise(trainerId, id) ?: throw NotFoundException("Упражнение не найдено в вашем списке.")
+    suspend fun goals(includeHidden: Boolean = false) = dbQuery {
+        val rows = Goals.selectAll()
+        if (!includeHidden) rows.andWhere { Goals.hidden eq false }
+        rows.orderBy(Goals.name.lowerCase(), order = SortOrder.ASC).map { GoalItem(it[Goals.id].value, it[Goals.name], it[Goals.hidden]) }
     }
 
-    suspend fun addExercise(trainerId: Long, muscleGroupId: Long? = null, name: String, description: String? = null): ExerciseCatalogItem = dbQuery {
-        resolveExercise(trainerId, null, muscleGroupId, name, description)
-    }
-
-    suspend fun updateExercise(trainerId: Long, id: Long, name: String, description: String?): ExerciseCatalogItem = dbQuery {
-        val trimmed = exerciseName(name)
-        val details = description?.trim()?.ifEmpty { null }
-        catalog.lockCatalog(trainerId)
-        val item = catalog.findExercise(trainerId, id) ?: throw NotFoundException("Упражнение не найдено в вашем списке.")
-        if (!catalog.updateExercise(trainerId, item.name, trimmed, details)) {
-            throw ConflictException("Упражнение с таким названием уже есть в вашем списке.")
+    suspend fun saveGoal(id: Long?, edit: CatalogEdit) = uniqueName {
+        val name = validName(edit.name, 128)
+        val saved = if (id == null) Goals.insertAndGetId {
+            it[Goals.name] = name
+            it[hidden] = edit.hidden
+        }.value else {
+            if (Goals.update({ Goals.id eq id }) { it[Goals.name] = name; it[hidden] = edit.hidden } == 0)
+                throw NotFoundException("Цель не найдена.")
+            Clients.update({ Clients.goalId eq id }) { it[goal] = name }
+            id
         }
-        item.copy(name = trimmed, description = details)
+        GoalItem(saved, name, edit.hidden)
     }
 
-    private fun exerciseName(name: String?): String = name.orEmpty().trim().also {
-        if (it.length !in 1..255) throw ValidationException("Название упражнения должно содержать от 1 до 255 символов.")
+    suspend fun deleteGoal(id: Long) = dbQuery {
+        if (Goals.deleteWhere { Goals.id eq id } == 0) throw NotFoundException("Цель не найдена.")
     }
 
-    /** Called within the catalog or workout write transaction. */
-    internal fun resolveExercise(trainerId: Long, id: Long?, muscleGroupId: Long?, name: String?, description: String? = null): ExerciseCatalogItem {
-        catalog.lockCatalog(trainerId)
-        if (id != null) return catalog.findExercise(trainerId, id)
-            ?: throw NotFoundException("Упражнение не найдено в вашем списке.")
-        val trimmed = exerciseName(name)
-        if (muscleGroupId != null && catalog.findMuscleGroupById(muscleGroupId) == null) {
-            throw ValidationException("Неизвестная группа мышц.")
-        }
-        return catalog.getOrCreateExercise(trainerId, muscleGroupId, trimmed, description?.trim()?.ifEmpty { null })
+    private fun validName(value: String, limit: Int) = value.trim().also {
+        if (it.length !in 1..limit) throw ValidationException("Название должно содержать от 1 до $limit символов.")
+    }
+
+    private suspend fun <T> uniqueName(block: suspend Transaction.() -> T): T = try {
+        dbQuery(block)
+    } catch (e: ExposedSQLException) {
+        if (e.sqlState == "23505") throw ConflictException("Такое название уже используется.")
+        throw e
     }
 }

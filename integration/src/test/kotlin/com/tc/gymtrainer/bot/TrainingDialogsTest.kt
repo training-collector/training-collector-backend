@@ -19,6 +19,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonPrimitive
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
+import com.tc.gymtrainer.service.CatalogEdit
 import org.testcontainers.containers.PostgreSQLContainer
 import java.sql.DriverManager
 
@@ -42,6 +43,8 @@ class TrainingDialogsTest {
                         BotRole.LOGIN_CODES.record("auth_test_bot")
                         val id = services.trainers.registerForWeb("profile_test", "Test", "Coach").trainer.id
                         services.telegramLinks.confirmSignup(services.telegramLinks.createSignupLink(id).url.substringAfter("?start="), 123)
+                        services.admin.approve(id)
+                        services.catalog.saveGoal(null, CatalogEdit("Поддержание"))
                         services.telegramLinks.connectTrainingBot(services.telegramLinks.createTrainingLink(id).url.substringAfter("?start="), 123)
 
                         val user = """{"id":123,"is_bot":false,"first_name":"Test"}"""
@@ -171,27 +174,15 @@ class TrainingDialogsTest {
                             callback("$action:${client.id}", annaCard)
                             return expect(expected)
                         }
-                        val emptyCatalog = inline(say("Упражнения", "Список упражнений пока пуст"))
-                        assertEquals(listOf("➕ Добавить упражнение"), emptyCatalog.map { it.text })
-                        click(emptyCatalog.first().callbackData, "Введите название")
-                        say("Отмена", "Отменено")
+                        assertTrue(services.catalog.exercises().isEmpty())
+                        say("Упражнения", "Список упражнений пока пуст")
+                        val press = services.catalog.saveExercise(null, CatalogEdit("Жим"))
                         val emptyWorkouts = inline(pressAnna("w:hist", "Завершённых тренировок пока нет"))
                         assertEquals(listOf("Записать тренировку", "К подопечному"), emptyWorkouts.map { it.text })
-                        click(emptyWorkouts.first().callbackData, "Список упражнений пока пуст")
+                        val choices = inline(click(emptyWorkouts.first().callbackData, "Выберите упражнение"))
+                        assertEquals(listOf("Жим", "Отмена"), choices.map { it.text })
                         val firstSession = services.workouts.activeForClient(id, client.id)!!.id
-                        click("ex:new", "Введите название")
-                        val draftActions = say("Черновик", "Сохранить").replyMarkup as ReplyKeyboardMarkup
-                        assertEquals(listOf(listOf("Сохранить"), listOf("Отмена"), listOf("Добавить описание")),
-                            draftActions.keyboard.map { row -> row.map { it.text } })
-                        say("Добавить описание", "Введите описание")
-                        say("Не сохранять это упражнение", "Сохранить упражнение?")
-                        say("Отмена", "Отменено")
-                        assertTrue(services.catalog.exercisesFor(id).isEmpty())
-                        pressAnna("w:add", "Список упражнений пока пуст")
-                        assertEquals(firstSession, services.workouts.activeForClient(id, client.id)!!.id)
-                        click("ex:new", "Введите название")
-                        say("Жим", "Сохранить")
-                        val setPrompt = say("Сохранить", "Введите подходы")
+                        val setPrompt = click(choices.first().callbackData, "Введите подходы")
                         assertEquals(listOf("Жим", "На повторения", "На время"), setPrompt.textSources.orEmpty().filterIsInstance<BoldTextSource>().map { it.source })
                         assertEquals(listOf("60 10", "0 12", "45с", "16 30с"), setPrompt.textSources.orEmpty().filterIsInstance<CodeTextSource>().map { it.source })
                         say("60 10\nошибка", "строку 2")
@@ -200,31 +191,14 @@ class TrainingDialogsTest {
                         say("Убрать последний подход", "Подходов в упражнении: 2")
                         assertTrue(services.workouts.history(id, client.id).isEmpty())
                         assertEquals(listOf(10, 8), services.workouts.getDetail(id, firstSession).exercises.single().sets.map { it.reps })
-                        val press = services.catalog.exercisesFor(id).single()
                         assertNull(press.muscleGroupId)
-                        val catalogMenu = inline(say("Упражнения", "Мои упражнения"))
-                        assertEquals(listOf("➕ Добавить упражнение", "Жим"), catalogMenu.map { it.text })
-                        click(catalogMenu.first().callbackData, "Введите название")
-                        say("Планка", "Сохранить")
-                        say("Сохранить", "«Планка» в вашем списке")
-                        val updatedCatalog = inline(expect("Мои упражнения"))
-                        val plank = services.catalog.exercisesFor(id).single { it.name == "Планка" }
-                        assertNull(plank.description)
-                        val catalogCard = click(updatedCatalog.single { it.text == "Планка" }.callbackData, "Планка")
+                        val plank = services.catalog.saveExercise(null, CatalogEdit("Планка"))
+                        val hold = services.catalog.saveExercise(null, CatalogEdit("Удержание гири", "Удерживайте гирю у груди."))
+                        val catalogMenu = inline(say("Упражнения", "Упражнения"))
+                        assertEquals(setOf(press.name, plank.name, hold.name), catalogMenu.map { it.text }.toSet())
+                        val catalogCard = click(catalogMenu.single { it.text == plank.name }.callbackData, "Планка")
                         assertEquals("Название: Планка\n\nОписание: не указано", catalogCard.text)
-                        val back = inline(catalogCard).single()
-                        assertEquals("К упражнениям", back.text)
-                        val allExercises = inline(click(back.callbackData, "Мои упражнения"))
-                        click(allExercises.first().callbackData, "Введите название")
-                        say("Удержание гири", "Сохранить")
-                        say("Добавить описание", "Введите описание")
-                        val preview = say("Удерживайте гирю у груди.", "Сохранить упражнение?")
-                        assertTrue(preview.text.contains("Название: Удержание гири\n\nОписание: Удерживайте гирю у груди."))
-                        assertTrue(services.catalog.exercisesFor(id).none { it.name == "Удержание гири" })
-                        say("Сохранить", "«Удержание гири» в вашем списке")
-                        val savedExercises = inline(expect("Мои упражнения"))
-                        val hold = services.catalog.exercisesFor(id).single { it.name == "Удержание гири" }
-                        assertEquals("Удерживайте гирю у груди.", hold.description)
+                        val savedExercises = inline(click(inline(catalogCard).single().callbackData, "Упражнения"))
                         val holdCard = click(savedExercises.single { it.text == hold.name }.callbackData, hold.name)
                         assertEquals("Название: Удержание гири\n\nОписание: Удерживайте гирю у груди.", holdCard.text)
 
@@ -243,11 +217,11 @@ class TrainingDialogsTest {
                         assertTrue(restored.text.contains("Жим") && restored.text.contains("62.5 кг × 8"))
                         assertTrue(buttons(restored).containsAll(listOf("Готово", "Убрать последний подход", "Главное меню")))
                         say("Готово", "Упражнений в тренировке: 1")
-                        val selection = say("Ещё упражнение", "Мои упражнения").replyMarkup as InlineKeyboardMarkup
-                        assertEquals(setOf("Жим", "Планка", "Удержание гири", "➕ Добавить упражнение", "Отмена"), selection.keyboard.flatten().map { it.text }.toSet())
+                        val selection = say("Ещё упражнение", "Выберите упражнение").replyMarkup as InlineKeyboardMarkup
+                        assertEquals(setOf("Жим", "Планка", "Удержание гири", "Отмена"), selection.keyboard.flatten().map { it.text }.toSet())
                         click("cancel", "Тренировка сохранена")
                         callback("w:resume:$firstSession", activeCard)
-                        expect("Мои упражнения")
+                        expect("Выберите упражнение")
                         callback("w:finish:$firstSession", activeCard)
                         expect("Тренировка завершена")
                         assertClientCard(expect("Анна Мария"))
@@ -259,7 +233,7 @@ class TrainingDialogsTest {
 
                         val afterFinish = inline(pressAnna("w:hist", "Тренировки"))
                         assertEquals(listOf("w:add:${client.id}", "w:view:$firstSession", "cl:view:${client.id}"), afterFinish.map { it.callbackData })
-                        click(afterFinish.first().callbackData, "Мои упражнения")
+                        click(afterFinish.first().callbackData, "Выберите упражнение")
                         val nextId = services.workouts.activeForClient(id, client.id)!!.id
                         assertNotEquals(firstSession, nextId)
                         assertTrue(services.workouts.getDetail(id, nextId).exercises.isEmpty())
@@ -276,11 +250,11 @@ class TrainingDialogsTest {
                             }
                         }
                         callback("w:resume:$nextId")
-                        expect("Мои упражнения")
+                        expect("Выберите упражнение")
                         click(plank.id.toString(), "45с")
                         say("45с", "45 с")
                         say("Готово", "Упражнений в тренировке: 1")
-                        say("Ещё упражнение", "Мои упражнения")
+                        say("Ещё упражнение", "Выберите упражнение")
                         click(hold.id.toString(), "16 30с")
                         say("16 30с", "16 кг × 30 с")
                         say("Готово", "Упражнений в тренировке: 2")
@@ -381,10 +355,10 @@ class TrainingDialogsTest {
                         }
                         recordAndEditMeasurements()
 
-                        repeat(25) { services.catalog.addExercise(id, name = "Вариант $it") }
-                        val fullCatalog = inline(say("Упражнения", "Мои упражнения"))
+                        repeat(25) { services.catalog.saveExercise(null, CatalogEdit("Вариант $it")) }
+                        val fullCatalog = inline(say("Упражнения", "Упражнения"))
                         val secondPage = inline(click(fullCatalog.single { it.text == "Дальше →" }.callbackData, "2 из 2"))
-                        assertEquals("➕ Добавить упражнение", secondPage.first().text)
+                        assertTrue(secondPage.none { it.callbackData == "ex:add" })
                         assertTrue(secondPage.any { it.callbackData == "ex:view:${hold.id}" })
                     }
                 } finally {

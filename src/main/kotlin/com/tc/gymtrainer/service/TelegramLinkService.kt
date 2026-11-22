@@ -23,7 +23,7 @@ data class ProfileBotLinks(val authUrl: String?, val trainingUrl: String?)
 
 data class SignupLink(val url: String, val expiresAt: OffsetDateTime, val challenge: String)
 
-enum class SignupConfirmation { LINKED, ALREADY_LINKED, TELEGRAM_IN_USE }
+enum class SignupConfirmation { PENDING_APPROVAL, ALREADY_LINKED, TELEGRAM_IN_USE }
 
 enum class BotRole(val id: Int) {
     TRAINING(1), LOGIN_CODES(2);
@@ -61,22 +61,22 @@ class TelegramLinkService {
         if (expiry <= now) throw expired()
         val role = BotRole.LOGIN_CODES
         val url = "https://t.me/${role.username()}?start="
-        val challenge = issueLoginChallenge(trainerId, LoginChallenge(Credentials.token(), url + "login", expiry), now)
-        val payload = if (trainer[Trainers.telegramLinkedAt] == null) {
-            issueToken(trainerId, role, challenge.expiresAt, now)
-        } else {
-            if (trainer[Trainers.approvedAt] == null) throw AccessDeniedException("Регистрация ожидает одобрения.")
-            "login"
+        if (trainer[Trainers.telegramLinkedAt] == null) {
+            val payload = issueToken(trainerId, role, expiry, now)
+            return@dbQuery SignupLink(url + payload, expiry, payload)
         }
-        SignupLink(url + payload, challenge.expiresAt, challenge.challenge)
+        if (trainer[Trainers.approvedAt] == null) throw AccessDeniedException("Регистрация ожидает одобрения.")
+        val challenge = issueLoginChallenge(trainerId, LoginChallenge(Credentials.token(), url + "login", expiry), now)
+        SignupLink(url + "login", challenge.expiresAt, challenge.challenge)
     }
 
     suspend fun confirmSignup(token: String, sender: Long): SignupConfirmation = dbQuery {
         val now = OffsetDateTime.now()
         val trainer = lockLinkOwner(token, BotRole.LOGIN_CODES, now)
+        if (trainer.deactivatedAt != null) throw AccessDeniedException("Аккаунт деактивирован.")
         if (trainer.telegramLinkedAt != null) {
             if (trainer.telegramUserId != sender) throw expired()
-            return@dbQuery SignupConfirmation.ALREADY_LINKED
+            return@dbQuery if (trainer.approvedAt == null) SignupConfirmation.PENDING_APPROVAL else SignupConfirmation.ALREADY_LINKED
         }
         if (trainer.telegramUserId != null && trainer.telegramUserId != sender) throw wrongAccount()
         // Two signup links opened by the same Telegram account can arrive concurrently.
@@ -95,14 +95,12 @@ class TelegramLinkService {
             it[codeChatStarted] = true
             it[signupExpiresAt] = null
             it[signupTelegramInUse] = false
-            // Auto-approval until the review module is introduced.
-            it[approvedAt] = now
         }
         // Keep only the consumed link so a second Start by the same sender can be acknowledged.
         val usedHash = linkHash(BotRole.LOGIN_CODES, token)
         TelegramLinks.deleteWhere { (trainerId eq trainer.id) and (tokenHash neq usedHash) }
         WebSessions.deleteWhere { (trainerId eq trainer.id) and (onboarding eq false) }
-        SignupConfirmation.LINKED
+        SignupConfirmation.PENDING_APPROVAL
     }
 
     suspend fun createTrainingLink(trainerId: Long): TelegramLink = dbQuery {

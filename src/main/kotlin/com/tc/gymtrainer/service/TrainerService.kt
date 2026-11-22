@@ -43,7 +43,8 @@ class TrainerService(private val trainers: TrainerRepository) {
 
     suspend fun authenticate(token: String): Trainer? = dbQuery {
         val hash = Credentials.digest(token)
-        if (token.startsWith("session.") || token.startsWith("signup.")) trainers.sessionTrainer(hash) else trainers.findByTokenHash(hash)
+        val trainer = if (token.startsWith("session.") || token.startsWith("signup.")) trainers.sessionTrainer(hash) else trainers.findByTokenHash(hash)
+        trainer?.takeIf { it.deactivatedAt == null }
     }
 
     suspend fun logout(token: String) = dbQuery {

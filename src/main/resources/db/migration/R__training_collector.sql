@@ -164,7 +164,7 @@ CREATE TABLE IF NOT EXISTS client (
     sex VARCHAR(8) CHECK (sex IN ('MALE', 'FEMALE')),
     age INTEGER CHECK (age BETWEEN 0 AND 130),
     telegram_username VARCHAR(32),
-    goal       VARCHAR(32),
+    goal       VARCHAR(128),
     notes      TEXT,
     status     VARCHAR(16)  NOT NULL DEFAULT 'ACTIVE',
     created_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
@@ -180,7 +180,6 @@ CREATE TABLE IF NOT EXISTS muscle_group (
 
 CREATE TABLE IF NOT EXISTS exercise_catalog (
     id              BIGSERIAL PRIMARY KEY,
-    trainer_id      BIGINT NOT NULL REFERENCES trainer (id),
     muscle_group_id BIGINT REFERENCES muscle_group (id),
     name            VARCHAR(255) NOT NULL
 );
@@ -284,11 +283,7 @@ CREATE INDEX IF NOT EXISTS idx_code_delivery ON login_challenge(next_delivery_at
 
 CREATE INDEX IF NOT EXISTS idx_measurement_history ON body_measurement (client_id, measured_on DESC, id DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_trainer_verified_phone ON trainer (phone) WHERE phone_verified_at IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS uq_exercise_catalog_trainer_group_name
-    ON exercise_catalog (trainer_id, muscle_group_id, lower(name));
-CREATE UNIQUE INDEX IF NOT EXISTS uq_exercise_catalog_ungrouped_name
-    ON exercise_catalog (trainer_id, lower(name))
-    WHERE muscle_group_id IS NULL;
+
 CREATE UNIQUE INDEX IF NOT EXISTS uq_telegram_bot_role ON telegram_bot_identity(lower(username));
 
 ALTER TABLE body_measurement
@@ -316,3 +311,33 @@ BEGIN
     ON CONFLICT (name) DO NOTHING;
 END
 $groups$;
+
+ALTER TABLE trainer ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMPTZ;
+CREATE TABLE IF NOT EXISTS admin_session (
+    token_hash VARCHAR(64) PRIMARY KEY,
+    expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE IF NOT EXISTS goal_catalog (
+    id BIGSERIAL PRIMARY KEY,
+    name VARCHAR(128) NOT NULL,
+    hidden BOOLEAN NOT NULL DEFAULT FALSE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_goal_name ON goal_catalog (lower(name));
+ALTER TABLE client ADD COLUMN IF NOT EXISTS goal_id BIGINT REFERENCES goal_catalog(id) ON DELETE SET NULL;
+ALTER TABLE exercise_catalog ADD COLUMN IF NOT EXISTS hidden BOOLEAN NOT NULL DEFAULT FALSE;
+
+DO $admin_upgrade$
+BEGIN
+    IF EXISTS (SELECT FROM information_schema.columns WHERE table_schema = current_schema()
+               AND table_name = 'exercise_catalog' AND column_name = 'trainer_id') THEN
+        -- Keep every old description and workout reference for review before publication.
+        UPDATE exercise_catalog SET hidden = TRUE;
+        ALTER TABLE exercise_catalog DROP COLUMN trainer_id;
+        ALTER TABLE client ALTER COLUMN goal TYPE VARCHAR(128);
+        UPDATE client SET goal = CASE goal
+            WHEN 'MASS_GAIN' THEN 'Набор массы' WHEN 'WEIGHT_LOSS' THEN 'Похудение'
+            WHEN 'MAINTENANCE' THEN 'Поддержание' WHEN 'REHAB' THEN 'Реабилитация' ELSE goal END;
+    END IF;
+END;
+$admin_upgrade$;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_live_exercise_name ON exercise_catalog (lower(name)) WHERE NOT hidden;

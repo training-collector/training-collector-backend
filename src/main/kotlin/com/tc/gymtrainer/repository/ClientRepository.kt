@@ -1,5 +1,7 @@
 package com.tc.gymtrainer.repository
 
+import com.tc.gymtrainer.db.Goals
+import com.tc.gymtrainer.service.ValidationException
 import com.tc.gymtrainer.db.Clients
 import com.tc.gymtrainer.domain.Client
 import com.tc.gymtrainer.domain.ClientStatus
@@ -57,14 +59,15 @@ class ClientRepository {
     fun update(
         id: Long,
         profile: ClientProfile,
+        previousGoal: String?,
         now: OffsetDateTime = OffsetDateTime.now(),
     ): Boolean =
         Clients.update({ Clients.id eq id }) {
-            it.writeProfile(profile)
+            it.writeProfile(profile, previousGoal)
             it[Clients.updatedAt] = now
         } > 0
 
-    private fun UpdateBuilder<*>.writeProfile(profile: ClientProfile) {
+    private fun UpdateBuilder<*>.writeProfile(profile: ClientProfile, previousGoal: String? = null) {
         this[Clients.fullName] = profile.fullName
         this[Clients.firstName] = profile.firstName
         this[Clients.lastName] = profile.lastName
@@ -72,7 +75,13 @@ class ClientRepository {
         this[Clients.age] = profile.age
         this[Clients.telegramUsername] = profile.telegramUsername
         this[Clients.phone] = profile.phone
-        this[Clients.goal] = profile.goal
+        if (profile.goal != previousGoal) {
+            this[Clients.goalId] = profile.goal?.let { name ->
+                Goals.selectAll().where { (Goals.name eq name) and (Goals.hidden eq false) }
+                    .forUpdate().singleOrNull()?.get(Goals.id) ?: throw ValidationException("Выберите доступную цель.")
+            }
+            this[Clients.goal] = profile.goal
+        }
         this[Clients.notes] = profile.notes
     }
 

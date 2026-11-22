@@ -103,7 +103,12 @@ class TelegramLoginFlowTest {
                         assertTrue(send(2, 123, command("/start", payload)).text.contains("недействительна"))
                         send(3, 456, command("/start", " login"), auth = true)
                         assertTrue(!authBot.deliverNext(authTelegram))
-                        dispatch(4, 123, command("/start", payload), auth = true)
+                        assertTrue(services.admin.trainers().isEmpty())
+                        assertTrue(send(4, 123, command("/start", payload), auth = true).text.contains("подтверждения администратора"))
+                        assertEquals(account.trainer.id, services.admin.trainers().single().id)
+                        assertTrue(!authBot.deliverNext(authTelegram))
+                        services.admin.approve(account.trainer.id)
+                        val firstChallenge = services.loginCodes.request("coach_local").challenge
                         withTimeout(5000) { while (!authBot.deliverNext(authTelegram)) delay(20) }
                         receiveHeading()
                         val code = receiveCode()
@@ -115,7 +120,7 @@ class TelegramLoginFlowTest {
                         assertTrue(conflict.text.contains("Этот аккаунт Telegram уже зарегистрирован"))
                         assertTrue(services.trainers.authenticate(duplicate.token)!!.signupTelegramInUse)
                         assertTrue(!authBot.deliverNext(authTelegram))
-                        val session = services.loginCodes.verify(link.challenge, code)
+                        val session = services.loginCodes.verify(firstChallenge, code)
                         val profile = session.trainer
                         assertEquals(account.trainer.id, profile.id)
                         assertEquals(123L, profile.telegramUserId)
@@ -161,6 +166,14 @@ class TelegramLoginFlowTest {
                         val nextCode = receiveCode()
                         assertTrue(authTelegram.sent.tryReceive().isFailure)
                         assertEquals(profile.id, services.loginCodes.verify(next.challenge, nextCode).trainer.id)
+                        assertTrue(press(50, "Добавить подопечного").text.contains("Имя нового"))
+                        services.admin.deactivate(profile.id)
+                        val revoked = press(51, "Анна")
+                        assertTrue(revoked.text.contains("Доступ к боту закрыт"))
+                        assertTrue(revoked.replyMarkup is ReplyKeyboardRemove)
+                        assertTrue(send(52, 123, command("/start"), auth = true).text.contains("деактивирован"))
+                        services.loginCodes.request("coach_local")
+                        assertFalse(authBot.deliverNext(authTelegram))
                         assertTrue(telegram.sent.tryReceive().isFailure)
                     }
                 } finally {

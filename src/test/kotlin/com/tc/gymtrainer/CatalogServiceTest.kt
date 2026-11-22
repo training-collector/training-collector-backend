@@ -1,38 +1,32 @@
 package com.tc.gymtrainer
 
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
+import com.tc.gymtrainer.service.*
 import kotlinx.coroutines.runBlocking
-import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 
 class CatalogServiceTest : AbstractDbTest() {
     @Test
-    fun `concurrent additions reuse one personal exercise and suggestions respect ownership`() = runBlocking {
-        val owner = newTrainer(301).id
-        val other = newTrainer(302).id
-        assertTrue(Services.catalog.exercisesFor(owner).isEmpty())
-        val items = (1..8).map {
-            async { Services.catalog.addExercise(owner, name = "Жим с паузой") }
-        }.awaitAll()
-        assertEquals(1, items.toSet().size)
-        assertEquals(listOf(items.first()), Services.catalog.suggest(owner, "пауз"))
-        assertTrue(Services.catalog.suggest(other, "пауз").isEmpty())
-    }
-
-    @Test
-    fun `legacy exercises with the same name keep their ids and have one choice in the flat catalog`() = runBlocking {
-        val owner = newTrainer(303).id
-        val groups = Services.catalog.listMuscleGroups()
-        val original = Services.catalog.addExercise(owner, groups[0].id, "Тяга")
-        val second = Services.catalog.addExercise(owner, groups[1].id, "тяга")
-        assertTrue(original.id != second.id)
-        assertEquals(listOf(second), Services.catalog.exercisesFor(owner, groups[1].id))
-        assertEquals(original, Services.catalog.addExercise(owner, name = " ТЯГА "))
-        assertEquals(listOf(original), Services.catalog.exercisesFor(owner))
-        Services.catalog.updateExercise(owner, original.id, "Тяга блока", null)
-        assertEquals(listOf(original.copy(name = "Тяга блока")), Services.catalog.exercisesFor(owner))
-        assertEquals(listOf(second.copy(name = "Тяга блока")), Services.catalog.exercisesFor(owner, groups[1].id))
+    fun `hidden and deleted entries cannot be selected and assigned goals retain their history`() = runBlocking<Unit> {
+        val catalog = Services.catalog
+        assertTrue(catalog.goals().isEmpty())
+        assertTrue(catalog.exercises().isEmpty())
+        val goal = catalog.saveGoal(null, CatalogEdit("Баланс"))
+        val trainer = newTrainer(188)
+        val client = Services.client.create(trainer.id, "Саша", null, goal.name, null)
+        catalog.saveGoal(goal.id, CatalogEdit("Координация", hidden = true))
+        assertTrue(catalog.goals().isEmpty())
+        assertEquals("Координация", Services.client.getOwned(trainer.id, client.id).goal)
+        assertThrows(ValidationException::class.java) { runBlocking { Services.client.create(trainer.id, "Борис", null, "Координация", null) } }
+        catalog.deleteGoal(goal.id)
+        assertEquals("Координация", Services.client.getOwned(trainer.id, client.id).goal)
+        val exercise = catalog.saveExercise(null, CatalogEdit("Выпады"))
+        assertThrows(ConflictException::class.java) { runBlocking { catalog.saveExercise(null, CatalogEdit("ВЫПАДЫ")) } }
+        catalog.saveExercise(exercise.id, CatalogEdit("Выпады", hidden = true))
+        assertThrows(NotFoundException::class.java) { runBlocking { catalog.getExercise(exercise.id) } }
+        catalog.saveExercise(exercise.id, CatalogEdit("Выпады"))
+        assertEquals(exercise, catalog.getExercise(exercise.id))
+        catalog.deleteExercise(exercise.id)
+        assertTrue(catalog.exercises(includeHidden = true).isEmpty())
     }
 }

@@ -2,7 +2,7 @@ package com.tc.gymtrainer
 
 import com.tc.gymtrainer.domain.ClientStatus
 import com.tc.gymtrainer.domain.ClientProfile
-import com.tc.gymtrainer.domain.Goal
+import com.tc.gymtrainer.service.CatalogEdit
 import com.tc.gymtrainer.service.AccessDeniedException
 import com.tc.gymtrainer.service.ValidationException
 import com.tc.gymtrainer.service.MeasurementInput
@@ -20,10 +20,13 @@ import org.junit.jupiter.api.Test
 
 class ClientServiceTest : AbstractDbTest() {
 
+    @org.junit.jupiter.api.BeforeEach
+    fun goals() { runBlocking { listOf("Набор массы", "Похудение").forEach { Services.catalog.saveGoal(null, CatalogEdit(it)) } } }
+
     @Test
     fun `create and list only active by default`() = runBlocking {
         val trainer = newTrainer(1001)
-        Services.client.create(trainer.id, "Аня", phone = "+7900", goal = Goal.WEIGHT_LOSS, notes = "колено")
+        Services.client.create(trainer.id, "Аня", phone = "+7900", goal = "Похудение", notes = "колено")
         val boris = Services.client.create(trainer.id, "Борис", phone = null, goal = null, notes = null)
         Services.client.archive(trainer.id, boris.id)
 
@@ -38,9 +41,9 @@ class ClientServiceTest : AbstractDbTest() {
     fun `update changes fields`() = runBlocking {
         val trainer = newTrainer(1002)
         val c = newClient(trainer, "Витя")
-        val updated = Services.client.update(trainer.id, c.id, "Виктор", "+7", Goal.MASS_GAIN, "цель — масса")
+        val updated = Services.client.update(trainer.id, c.id, "Виктор", "+7", "Набор массы", "цель — масса")
         assertEquals("Виктор", updated.fullName)
-        assertEquals(Goal.MASS_GAIN, updated.goal)
+        assertEquals("Набор массы", updated.goal)
         assertEquals("+7", updated.phone)
     }
 
@@ -94,14 +97,14 @@ class ClientServiceTest : AbstractDbTest() {
         }
         assertTrue(Services.client.list(trainer.id).isEmpty())
         assertThrows(ValidationException::class.java) {
-            runBlocking { Services.client.create(trainer.id, profile.copy(goal = Goal.REHAB)) }
+            runBlocking { Services.client.create(trainer.id, profile.copy(goal = "Реабилитация")) }
         }
         val client = Services.client.create(trainer.id, profile)
-        dbQuery { Clients.update({ Clients.id eq client.id }) { it[goal] = Goal.REHAB } }
-        assertEquals(Goal.REHAB, Services.client.updateProfile(trainer.id, client.id) { it.copy(notes = "Заметка") }.goal)
-        Services.client.updateProfile(trainer.id, client.id) { it.copy(goal = Goal.WEIGHT_LOSS) }
+        dbQuery { Clients.update({ Clients.id eq client.id }) { it[goal] = "Реабилитация" } }
+        assertEquals("Реабилитация", Services.client.updateProfile(trainer.id, client.id) { it.copy(notes = "Заметка") }.goal)
+        Services.client.updateProfile(trainer.id, client.id) { it.copy(goal = "Похудение") }
         assertThrows(ValidationException::class.java) {
-            runBlocking { Services.client.updateProfile(trainer.id, client.id) { it.copy(goal = Goal.REHAB) } }
+            runBlocking { Services.client.updateProfile(trainer.id, client.id) { it.copy(goal = "Реабилитация") } }
         }
         Unit
     }

@@ -1,7 +1,6 @@
 package com.tc.gymtrainer.db
 
 import com.tc.gymtrainer.domain.ClientStatus
-import com.tc.gymtrainer.domain.Goal
 import com.tc.gymtrainer.domain.Sex
 import com.tc.gymtrainer.domain.WorkoutStage
 import org.jetbrains.exposed.dao.id.LongIdTable
@@ -28,6 +27,7 @@ object Trainers : LongIdTable("trainer") {
     val approvedAt = timestampWithTimeZone("approved_at").nullable()
     val signupExpiresAt = timestampWithTimeZone("signup_expires_at").nullable()
     val signupTelegramInUse = bool("signup_telegram_in_use").default(false)
+    val deactivatedAt = timestampWithTimeZone("deactivated_at").nullable()
     val codeChatStarted = bool("code_chat_started").default(false)
     val consentAt = timestampWithTimeZone("consent_at").nullable()
     val createdAt = timestampWithTimeZone("created_at")
@@ -75,7 +75,8 @@ object Clients : LongIdTable("client") {
     val trainerId = reference("trainer_id", Trainers)
     val fullName = varchar("full_name", 255)
     val phone = varchar("phone", 64).nullable()
-    val goal = enumerationByName<Goal>("goal", 32).nullable()
+    val goal = varchar("goal", 128).nullable()
+    val goalId = optReference("goal_id", Goals)
     val notes = text("notes").nullable()
     val status = enumerationByName<ClientStatus>("status", 16)
     val createdAt = timestampWithTimeZone("created_at")
@@ -86,8 +87,19 @@ object MuscleGroups : LongIdTable("muscle_group") {
     val name = varchar("name", 128).uniqueIndex("uq_muscle_group_name")
 }
 
+object Goals : LongIdTable("goal_catalog") {
+    val name = varchar("name", 128)
+    val hidden = bool("hidden").default(false)
+}
+
+object AdminSessions : Table("admin_session") {
+    val tokenHash = varchar("token_hash", 64)
+    val expiresAt = timestampWithTimeZone("expires_at")
+    override val primaryKey = PrimaryKey(tokenHash)
+}
+
 object ExerciseCatalog : LongIdTable("exercise_catalog") {
-    val trainerId = reference("trainer_id", Trainers)
+    val hidden = bool("hidden").default(false)
     val muscleGroupId = optReference("muscle_group_id", MuscleGroups)
     val name = varchar("name", 255)
     val description = text("description").nullable()

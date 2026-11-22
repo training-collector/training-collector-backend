@@ -23,6 +23,7 @@ data class Trainer(
     val approvedAt: OffsetDateTime? = null,
     val trainingBotLinkedAt: OffsetDateTime? = null,
     val signupTelegramInUse: Boolean = false,
+    val deactivatedAt: OffsetDateTime? = null,
 )
 
 data class Client(
@@ -30,7 +31,7 @@ data class Client(
     val trainerId: Long,
     val fullName: String,
     val phone: String?,
-    val goal: Goal?,
+    val goal: String?,
     val notes: String?,
     val status: ClientStatus,
     val createdAt: OffsetDateTime,
@@ -53,7 +54,7 @@ data class ClientProfile(
     val age: Int? = null,
     val telegramUsername: String? = null,
     val phone: String? = null,
-    val goal: Goal? = null,
+    val goal: String? = null,
     val notes: String? = null,
 ) {
     val fullName: String get() = listOfNotNull(firstName, lastName).joinToString(" ")
@@ -69,6 +70,7 @@ data class ExerciseCatalogItem(
     val muscleGroupId: Long?,
     val name: String,
     val description: String? = null,
+    val hidden: Boolean = false,
 )
 
 enum class WorkoutStage { CHOOSE_TEMPLATE, CHOOSE_EXERCISE, ENTER_SETS, REVIEW, COMPLETED }

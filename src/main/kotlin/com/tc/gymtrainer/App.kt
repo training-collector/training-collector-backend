@@ -3,11 +3,11 @@ package com.tc.gymtrainer
 import com.tc.gymtrainer.api.trainingApi
 import com.tc.gymtrainer.config.AppConfig
 import com.tc.gymtrainer.db.DatabaseFactory
-import com.tc.gymtrainer.repository.CatalogRepository
 import com.tc.gymtrainer.repository.ClientRepository
 import com.tc.gymtrainer.repository.MeasurementRepository
 import com.tc.gymtrainer.repository.TrainerRepository
 import com.tc.gymtrainer.repository.WorkoutRepository
+import com.tc.gymtrainer.service.AdminService
 import com.tc.gymtrainer.service.CatalogService
 import com.tc.gymtrainer.service.ClientService
 import com.tc.gymtrainer.service.MeasurementService
@@ -21,14 +21,14 @@ import io.ktor.server.netty.Netty
 class TrainingServices {
     private val clientRepository = ClientRepository()
     private val workoutRepository = WorkoutRepository()
-    private val catalogRepository = CatalogRepository()
     private val measurementRepository = MeasurementRepository()
 
+    val admin = AdminService()
     val trainers = TrainerService(TrainerRepository())
     val telegramLinks = TelegramLinkService()
     val loginCodes = LoginCodeService(TrainerRepository())
     val clients = ClientService(clientRepository, workoutRepository, measurementRepository)
-    val catalog = CatalogService(catalogRepository)
+    val catalog = CatalogService()
     val workouts = WorkoutService(workoutRepository, clientRepository, catalog)
     val measurements = MeasurementService(measurementRepository, clientRepository)
 }
@@ -44,7 +44,7 @@ fun main() {
     val config = AppConfig.load()
     withTrainingServices(config) { services ->
         val server = embeddedServer(Netty, host = config.server.host, port = config.server.port) {
-            trainingApi(services, config.bots)
+            trainingApi(services, config.bots, config.admin)
         }
         server.start(wait = true)
     }

@@ -28,6 +28,14 @@ curl http://localhost:8080/health
 
 Учитывайте лимит подключений PostgreSQL при настройке `DB_MAX_POOL_SIZE` (по умолчанию 5 на экземпляр). Выберите регион выполнения рядом с БД. После деплоя откройте `/health` по постоянному HTTPS-домену Production. Этот адрес должен быть доступен фронтенду и ботам без интерактивного входа в Vercel. Используйте отдельную базу и отдельные ключи для Preview.
 
+## Администрирование
+
+Задайте `ADMIN_LOGIN` и `ADMIN_PASSWORD` в окружении бэкенда. Пустое значение закрывает вход. `POST /admin/v1/login` принимает `login` и `password`, возвращает токен на 8 часов. Для последующих запросов используйте Bearer. `POST /admin/v1/logout` отзывает токен.
+
+- `GET /admin/v1/trainers` показывает привязавших Telegram тренеров. `POST /admin/v1/trainers/{id}/approve` одобряет заявку и создаёт код. Повторное одобрение активного тренера безопасно.
+- `POST /admin/v1/trainers/{id}/deactivate` закрывает кабинет и обоих ботов, отзывает сессии, API-ключ, ссылки и коды. `DELETE /admin/v1/trainers/{id}` удаляет также подопечных и их историю.
+- `/admin/v1/exercises` и `/admin/v1/goals` поддерживают GET, POST и по идентификатору PUT и DELETE. Поле `hidden` управляет публикацией. Старые личные упражнения переходят в скрытые, история тренировок сохраняет исходные названия. Действующие тренеры сохраняют прежнее одобрение.
+
 ## Тесты
 
 `./gradlew build` запускает проверки сервисов, миграций и HTTP API с Testcontainers. Нужен Docker. Сквозные проверки обоих Telegram-диалогов поднимают временную базу и настоящий HTTP-сервер. Они запускаются отдельно при наличии исходников обоих ботов в любых каталогах:
@@ -38,18 +46,18 @@ curl http://localhost:8080/health
 
 ## Записать первую тренировку
 
-Пример для `sh` и `jq`. После входа по коду передайте токен веб-сессии из ответа `POST /api/v1/auth/login/verify` в переменной окружения `TRAINER_TOKEN`.
+Пример для `bash` и `jq`. После входа по коду передайте токен веб-сессии из ответа `POST /api/v1/auth/login/verify` в переменной окружения `TRAINER_TOKEN`.
 
 ```sh
 api=http://localhost:8080/api/v1
 auth="Authorization: Bearer ${TRAINER_TOKEN:?Укажите токен сессии}"
 
 client=$(curl -fsS "$api/clients" -H "$auth" -H 'Content-Type: application/json' \
-  -d '{"fullName":"Ирина","goal":"MAINTENANCE"}' | jq -er .id)
-crunch=$(curl -fsS "$api/catalog/exercises" -H "$auth" -H 'Content-Type: application/json' \
-  -d '{"name":"Скручивания"}' | jq -er .id)
-plank=$(curl -fsS "$api/catalog/exercises" -H "$auth" -H 'Content-Type: application/json' \
-  -d '{"name":"Планка"}' | jq -er .id)
+  -d '{"fullName":"Ирина"}' | jq -er .id)
+# Сначала опубликуйте оба упражнения в админке.
+exercises=$(curl -fsS "$api/catalog/exercises" -H "$auth")
+crunch=$(jq -er '.[] | select(.name == "Скручивания") | .id' <<< "$exercises")
+plank=$(jq -er '.[] | select(.name == "Планка") | .id' <<< "$exercises")
 
 curl -fsS "$api/clients/$client/workouts" -H "$auth" -H 'Content-Type: application/json' -d "{
   \"performedAt\":\"2026-11-21T10:00:00+04:00\",
@@ -96,7 +104,7 @@ curl -fsS "$api/clients/$client/measurements/current" -H "$auth"
 | Метод и путь | Назначение |
 |---|---|
 | `POST /trainers` | Создать заявку по `username`, `firstName`, `lastName`. Ответ содержит `trainer` и ограниченный `token` |
-| `POST /trainers/me/telegram-link` | Получить `url` для Auth Bot, `challenge` и `expiresAt` для ввода первого кода. Ссылка действует до пяти минут. После `/start` Auth Bot доставляет код в личный чат |
+| `POST /trainers/me/telegram-link` | Получить `url` для Auth Bot, `challenge` и `expiresAt` для ввода первого кода. Ссылка действует до пяти минут. После `/start` заявка поступает администратору. Одобрение ставит первый код в очередь доставки. После одобрения запросите ссылку снова для получения актуального challenge |
 | `GET /trainers/me` | Профиль с `telegramLinkedAt`, `approvedAt` и `trainingBotLinkedAt` |
 | `POST /trainers/me/training-bot-link` | После входа по коду получить персональную ссылку на бота для тренировок на 10 минут. Подтверждается командой `/start` с того же Telegram-аккаунта |
 | `POST /auth/login` | Запросить код по `username`. Ответ содержит `challenge`, `botUrl`, `expiresAt`. Одобренному профилю код доставляет бот авторизации после активации чата |
@@ -108,9 +116,7 @@ curl -fsS "$api/clients/$client/measurements/current" -H "$auth"
 | `GET /clients/{id}`, `PUT /clients/{id}` | Прочитать или заменить поля карточки — `fullName`, `phone`, `goal`, `notes` |
 | `GET /trainers/me/bot-links` | Адреса чатов бота авторизации и подключённого тренировочного бота для профиля тренера |
 | `GET /catalog/muscle-groups` | Справочник групп для прежних версий API |
-| `GET /catalog/exercises`, `GET /catalog/muscle-groups/{id}/exercises` | Личный список упражнений тренера целиком или для одной группы мышц |
-| `POST /catalog/exercises` | Добавить упражнение по `name` с необязательным `description`. Ответ 200 содержит карточку упражнения. Повторное добавление по названию возвращает ранее созданное упражнение тренера |
-| `PUT /catalog/exercises/{id}` | Сохранить `name` и необязательное `description` своего упражнения. Пустое описание очищает поле. Название обновляется во всех связанных тренировках. Возвращает обновлённое упражнение (200), ошибку имени (400), отсутствующего или чужого упражнения (404) либо занятого названия (409) |
+| `GET /catalog/exercises`, `GET /catalog/muscle-groups/{id}/exercises` | Опубликованные общие упражнения целиком или по исторической группе |
 | `POST /clients/{id}/workouts`, `GET /clients/{id}/workouts` | Записать тренировку или получить историю. Фильтры — `from` включительно, `to` исключительно (ISO 8601 с часовым поясом), `exercise` по части названия |
 | `GET /workouts/{id}` | Получить тренировку с упражнениями и результатами подходов |
 | `PUT /sets/{id}` | Заменить результат подхода. Тело того же формата, что при создании. Успешный ответ — 204 |
@@ -127,6 +133,6 @@ curl -fsS "$api/clients/$client/measurements/current" -H "$auth"
 | `POST /exercises/{id}/sets`, `DELETE /sets/{id}` | Добавить или удалить подход |
 | `PUT /measurements/{id}`, `DELETE /measurements/{id}` | Исправить датированную запись целиком или удалить её |
 
-Для записи тренировки или добавления упражнения передайте `exerciseCatalogId` из личного списка и `sets`. Название берётся из каталога. Для совместимости со старыми клиентами API также принимает `muscleGroupId` и `exerciseName` вместе с `sets`, чтобы найти или создать упражнение при записи. Если идентификатор упражнения отсутствует в личном каталоге, сервер вернёт 404.
+Для записи передайте `exerciseCatalogId` из общего справочника и `sets`. Старые клиенты могут передать имя опубликованного упражнения. Сервер возвращает 404 для неизвестного или скрытого упражнения. Доступные цели возвращает `GET /catalog/goals`. В карточке подопечного поле `goal` содержит название.
 
 При создании тренера, подопечного, тренировки, упражнения в тренировке, подхода или замера сервер возвращает 201. Для некорректного ввода API возвращает 400, для отсутствующего или недействительного токена — 401, для чужой тренировки или карточки — 403, для отсутствующей записи — 404.

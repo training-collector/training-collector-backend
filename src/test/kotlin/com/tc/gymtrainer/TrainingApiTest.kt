@@ -28,6 +28,7 @@ class TrainingApiTest : AbstractDbTest() {
     private var server: Process? = null
     private val http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(2)).build()
     private val json = ObjectMapper()
+    private val adminPassword = java.util.UUID.randomUUID().toString()
     private val authKey = java.util.UUID.randomUUID().toString()
     private val trainingKey = java.util.UUID.randomUUID().toString()
     private lateinit var base: String
@@ -46,6 +47,8 @@ class TrainingApiTest : AbstractDbTest() {
             .directory(logs.toFile())
             .apply {
                 environment().apply {
+                    put("ADMIN_LOGIN", "admin-test")
+                    put("ADMIN_PASSWORD", adminPassword)
                     put("AUTH_SERVICE_KEY", authKey)
                     put("TRAINING_SERVICE_KEY", trainingKey)
                     put("DB_JDBC_URL", db.jdbcUrl)
@@ -88,7 +91,7 @@ class TrainingApiTest : AbstractDbTest() {
     }
 
     private fun request(method: String, path: String, status: Int, token: String? = null, body: String? = null): JsonNode {
-        val builder = HttpRequest.newBuilder(URI.create(base + path)).timeout(Duration.ofSeconds(10))
+        val builder = HttpRequest.newBuilder(URI.create(if (path.startsWith("/admin/") || path.startsWith("/internal/")) base.removeSuffix("/api/v1") + path else base + path)).timeout(Duration.ofSeconds(10))
         if (token != null) builder.header("Authorization", "Bearer $token")
         if (body != null) builder.header("Content-Type", "application/json")
         val publisher = body?.let(HttpRequest.BodyPublishers::ofString) ?: HttpRequest.BodyPublishers.noBody()
@@ -102,13 +105,18 @@ class TrainingApiTest : AbstractDbTest() {
     private val codes = TrainingServices().loginCodes
     private var nextSender = 100_000_000L
 
+    private fun admin() = request("POST", "/admin/v1/login", 200, body = json.writeValueAsString(mapOf("login" to "admin-test", "password" to adminPassword)))["token"].asText()
+
     private fun linkTelegram(token: String, sender: Long): String {
         runBlocking { BotRole.LOGIN_CODES.record("training_codes_bot") }
         val link = request("POST", "/trainers/me/telegram-link", 200, token)
         val url = link["url"].asText()
         assertTrue(url.startsWith("https://t.me/training_codes_bot?start="))
         runBlocking { links.confirmSignup(url.substringAfter("?start="), sender) }
-        return link["challenge"].asText()
+        val profile = request("GET", "/trainers/me", 200, token)
+        assertTrue(profile["approvedAt"].isNull)
+        request("POST", "/admin/v1/trainers/${profile["id"]}/approve", 204, admin())
+        return runBlocking { codes.request(profile["username"].asText()).challenge }
     }
 
     private fun register(): String {
@@ -212,63 +220,73 @@ class TrainingApiTest : AbstractDbTest() {
     }
 
     @Test
-    fun `trainers build their own exercise lists and reuse them for multiple clients`() {
+    fun `admin controls shared catalogs and historical workouts survive catalog deletion`() {
         val owner = register()
         val other = register()
+        val admin = admin()
         val catalog = "/catalog/exercises"
-        val group = request("GET", "/catalog/muscle-groups", 200, owner).first()["id"].asLong()
-        val groupPath = "/catalog/muscle-groups/$group/exercises"
-        val input = """{"muscleGroupId":$group,"name":"Жим с паузой"}"""
-        request("GET", catalog, 401)
-        assertTrue(request("GET", catalog, 200, owner).isEmpty)
-        val item = request("POST", catalog, 200, owner, input)
-        assertEquals(item, request("POST", catalog, 200, owner, input.replace("Жим", "  жим")))
-        assertEquals(item, request("GET", groupPath, 200, owner).single())
-        assertTrue(request("GET", groupPath, 200, other).isEmpty)
-        assertTrue(request("POST", catalog, 200, other, input)["id"] != item["id"])
-        request("POST", catalog, 400, owner, """{"muscleGroupId":$group,"name":"  "}""")
-        request("POST", catalog, 400, owner, """{"muscleGroupId":999999,"name":"Жим"}""")
-
-        val exercise = """{"exerciseCatalogId":${item["id"]},"sets":[{"reps":8}]}"""
-        val workout = """{"performedAt":"2026-11-21T09:00:00Z","exercises":[$exercise]}"""
-        repeat(2) {
-            val saved = request("POST", "/clients/${client(owner)}/workouts", 201, owner, workout)
-            val exerciseRow = saved["exercises"].single()["exercise"]
-            assertEquals(item["id"], exerciseRow["exerciseCatalogId"])
-            assertEquals(item["name"], exerciseRow["exerciseName"])
-        }
-        val otherPath = "/clients/${client(other)}/workouts"
-        request("POST", otherPath, 404, other, workout)
-        assertTrue(request("GET", otherPath, 200, other).isEmpty)
-        val inline = """{"muscleGroupId":$group,"exerciseName":"Тяга","sets":[{"reps":6}]}"""
-        val session = request("POST", otherPath, 201, other, workout.replace(exercise, inline))["session"]
-        request("POST", "/workouts/${session["id"]}/exercises", 404, other, exercise)
-        assertEquals(setOf("Жим с паузой", "Тяга"), request("GET", catalog, 200, other).map { it["name"].asText() }.toSet())
+        val manage = "/admin/v1/exercises"
+        val input = """{"name":"Планка","description":"Локти под плечами"}"""
+        request("GET", manage, 401, owner)
+        request("POST", catalog, 405, owner, input)
+        val item = request("POST", manage, 201, admin, input)
         assertEquals(item, request("GET", catalog, 200, owner).single())
-        val plank = request("POST", catalog, 200, owner, """{"name":"Планка","description":" Удерживайте корпус прямо. "}""")
-        assertEquals("Удерживайте корпус прямо.", plank["description"].asText())
-        assertEquals(plank, request("POST", catalog, 200, owner, """{"name":" планка "}"""))
-        val timed = """{"exerciseCatalogId":${plank["id"]},"sets":[{"durationSec":45}]}"""
-        val timedWorkout = request("POST", "/clients/${client(owner)}/workouts", 201, owner, workout.replace(exercise, timed))
-        assertEquals(plank["id"], timedWorkout["exercises"].single()["exercise"]["exerciseCatalogId"])
-        request("POST", otherPath, 404, other, workout.replace(exercise, timed))
-        val edit = "$catalog/${plank["id"]}"
-        request("PUT", edit, 401, body = """{"name":"Обновление"}""")
-        request("PUT", edit, 404, other, """{"name":"Обновление"}""")
-        request("PUT", edit, 400, owner, """{"name":"  "}""")
-        request("PUT", edit, 409, owner, """{"name":"  жим с паузой "}""")
-        val renamed = request("PUT", edit, 200, owner, """{"name":"  Боковая планка ","description":"Опора на предплечье."}""")
-        assertEquals(plank["id"], renamed["id"])
-        assertEquals("Боковая планка", renamed["name"].asText())
-        assertEquals("Опора на предплечье.", renamed["description"].asText())
-        assertTrue(request("GET", catalog, 200, owner).any { it == renamed })
-        val before = timedWorkout["exercises"].single()
-        val after = request("GET", "/workouts/${timedWorkout["session"]["id"]}", 200, owner)["exercises"].single()
-        assertEquals("Боковая планка", after["exercise"]["exerciseName"].asText())
-        assertEquals(before["exercise"]["id"], after["exercise"]["id"])
-        assertEquals(before["sets"], after["sets"])
-        val cleared = request("PUT", edit, 200, owner, """{"name":"Боковая планка","description":""}""")
-        assertTrue(cleared["description"].isNull)
+        assertEquals(item, request("GET", catalog, 200, other).single())
+        val path = "/clients/${client(owner)}/workouts"
+        val workout = """{"performedAt":"2026-11-21T09:00:00Z","exercises":[{"exerciseCatalogId":${item["id"]},"sets":[{"durationSec":45}]}]}"""
+        val session = request("POST", path, 201, owner, workout)["session"]["id"]
+        request("POST", path, 404, owner, workout.replace(""""exerciseCatalogId":${item["id"]}""", """"exerciseName":"Нет в каталоге"""".trim()))
+        val edit = "$manage/${item["id"]}"
+        request("PUT", edit, 200, admin, """{"name":"Планка","hidden":true}""")
+        assertTrue(request("GET", catalog, 200, other).isEmpty)
+        request("POST", path, 404, owner, workout)
+        request("DELETE", edit, 204, admin)
+        val history = request("GET", "/workouts/$session", 200, owner)["exercises"].single()
+        assertEquals("Планка", history["exercise"]["exerciseName"].asText())
+        assertEquals(45, history["sets"].single()["durationSec"].asInt())
+        val goals = "/admin/v1/goals"
+        assertTrue(request("GET", "/catalog/goals", 200, owner).isEmpty)
+        val goal = request("POST", goals, 201, admin, """{"name":"Сила"}""")
+        assertEquals(goal, request("GET", "/catalog/goals", 200, other).single())
+        request("PUT", "$goals/${goal["id"]}", 200, admin, """{"name":"Осанка","hidden":true}""")
+        assertTrue(request("GET", "/catalog/goals", 200, other).isEmpty)
+        request("DELETE", "$goals/${goal["id"]}", 204, admin)
+    }
+
+    @Test
+    fun `only linked signups can be approved and deactivation revokes every credential`() {
+        val admin = admin()
+        val path = "/admin/v1/trainers"
+        request("GET", path, 401)
+        request("POST", "/admin/v1/login", 401, body = """{"login":"admin-test","password":"wrong"}""")
+        val signup = request("POST", "/trainers", 201, body = """{"username":"pending","firstName":"Имя","lastName":"Тест"}""")
+        val unlinked = signup["trainer"]["id"]
+        assertTrue(request("GET", path, 200, admin).isEmpty)
+        request("POST", "$path/$unlinked/approve", 409, admin)
+        val session = register()
+        val active = request("GET", path, 200, admin).single()
+        val id = active["id"].asLong()
+        val sender = active["telegramUserId"].asLong()
+        val key = request("POST", "/trainers/me/api-key", 200, session)["token"].asText()
+        val record = client(session)
+        request("POST", "/clients/$record/measurements", 201, session, """{"measuredOn":"2026-11-01","weightKg":75}""")
+        runBlocking { BotRole.TRAINING.record("training_bot") }
+        val link = request("POST", "/trainers/me/training-bot-link", 200, session)["url"].asText()
+        runBlocking { links.connectTrainingBot(link.substringAfter("?start="), sender) }
+        val oldCode = runBlocking { codes.request(active["username"].asText()).challenge }
+        runBlocking { codes.prepareDelivery(oldCode, "123456") }
+        request("POST", "$path/$id/deactivate", 204, admin)
+        request("GET", "/clients", 401, session)
+        request("GET", "/clients", 401, key)
+        request("GET", "/internal/v1/training/chats/$sender/clients", 401, trainingKey)
+        request("POST", "/auth/login/verify", 401, body = """{"challenge":"$oldCode","code":"123456"}""")
+        assertTrue(request("GET", path, 200, admin).single()["deactivatedAt"].isTextual)
+        assertTrue(runBlocking { codes.nextDelivery() } == null)
+        request("POST", "$path/$id/approve", 409, admin)
+        request("DELETE", "$path/$id", 204, admin)
+        assertTrue(request("GET", path, 200, admin).isEmpty)
+        request("POST", "/admin/v1/logout", 204, admin)
+        request("GET", path, 401, admin)
     }
 
     @Test
@@ -278,6 +296,7 @@ class TrainingApiTest : AbstractDbTest() {
         val clientId = client(owner)
         val path = "/clients/$clientId"
         val group = request("GET", "/catalog/muscle-groups", 200, owner).first()["id"].asLong()
+        runBlocking { Services.catalog.saveExercise(null, com.tc.gymtrainer.service.CatalogEdit("Жим")) }
         val exercise = """{"muscleGroupId":$group,"exerciseName":"Жим","sets":[{"reps":8},{"durationSec":20}]}"""
         val workout = request("POST", "$path/workouts", 201, owner,
             """{"performedAt":"2026-11-21T09:00:00Z","exercises":[$exercise]}""")
@@ -356,6 +375,7 @@ class TrainingApiTest : AbstractDbTest() {
         val clientId = client(token)
         val path = "/clients/$clientId/workouts"
         val group = request("GET", "/catalog/muscle-groups", 200, token).first()["id"].asLong()
+        runBlocking { Services.catalog.saveExercise(null, com.tc.gymtrainer.service.CatalogEdit("Тестовое упражнение")) }
         fun workout(sets: String) = """
             {"performedAt":"2026-11-20T12:00:00+04:00","exercises":[
               {"muscleGroupId":$group,"exerciseName":"Тестовое упражнение","sets":$sets}

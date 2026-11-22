@@ -51,7 +51,7 @@ class WorkoutService(
 
     /** Вставляет одно упражнение с подходами, регистрируя новое в справочнике. */
     private fun insertExercise(session: WorkoutSession, draft: ExerciseDraft, orderIndex: Int): WorkoutExercise {
-        val item = catalog.resolveExercise(session.trainerId, draft.exerciseCatalogId, draft.muscleGroupId, draft.exerciseName)
+        val item = catalog.resolveExercise(draft.exerciseCatalogId, draft.exerciseName)
         val exercise = workouts.insertExercise(
             sessionId = session.id,
             muscleGroupId = item.muscleGroupId,
