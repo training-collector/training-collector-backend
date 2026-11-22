@@ -1,1 +1,1 @@
-rootProject.name = "training-collector-platform"
+rootProject.name = "training-collector-backend"

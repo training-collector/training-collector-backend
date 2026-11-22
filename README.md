@@ -1,4 +1,4 @@
-# Training Collector Platform
+# Training Collector Backend
 
 HTTP API на Ktor. Платформа хранит данные в PostgreSQL 16 и применяет миграции Flyway при запуске.
 
@@ -13,7 +13,7 @@ HTTP API на Ktor. Платформа хранит данные в PostgreSQL 1
 curl http://localhost:8080/health
 ```
 
-Для Docker выполните `docker build -t training-collector-platform .` и `docker run --env-file .env -p 8080:8080 training-collector-platform`. Внутри контейнера в `DB_JDBC_URL` укажите хост PostgreSQL, доступный из его сети. HTTP слушает `SERVER_HOST` и `SERVER_PORT`. Telegram-токены задаются только в соответствующих ботах.
+Для Docker выполните `docker build -t training-collector-backend .` и `docker run --env-file .env -p 8080:8080 training-collector-backend`. Внутри контейнера в `DB_JDBC_URL` укажите хост PostgreSQL, доступный из его сети. HTTP слушает `SERVER_HOST` и `SERVER_PORT`. Telegram-токены задаются только в соответствующих ботах.
 
 ## Тесты
 

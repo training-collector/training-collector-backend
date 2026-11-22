@@ -7,7 +7,7 @@ RUN ./gradlew --no-daemon installDist
 
 FROM eclipse-temurin:25-jre
 WORKDIR /app
-COPY --from=build /src/build/install/training-collector-platform/ ./
+COPY --from=build /src/build/install/training-collector-backend/ ./
 USER 10001
 EXPOSE 8080
-ENTRYPOINT ["/app/bin/training-collector-platform"]
+ENTRYPOINT ["/app/bin/training-collector-backend"]

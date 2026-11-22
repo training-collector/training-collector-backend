@@ -3,7 +3,7 @@ plugins { kotlin("jvm") version "2.3.21" }
 repositories { mavenCentral() }
 kotlin { jvmToolchain(25) }
 dependencies {
-    testImplementation("com.tc:training-collector-platform:1.0.0")
+    testImplementation("com.tc:training-collector-backend:1.0.0")
     testImplementation("com.tc:training-collector-bot:1.0.0")
     testImplementation("com.tc:training-collector-auth-bot:1.0.0")
     testImplementation("dev.inmo:tgbotapi:24.0.2")
