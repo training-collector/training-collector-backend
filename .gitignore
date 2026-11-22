@@ -38,6 +38,7 @@ replay_pid*
 *.log
 .DS_Store
 .idea/
+.vercel/
 *.iml
 .gradle/
 .kotlin/

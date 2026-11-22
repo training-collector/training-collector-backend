@@ -73,9 +73,4 @@ class TrainerService(private val trainers: TrainerRepository) {
         token
     }
 
-    suspend fun recordConsent(trainerId: Long): Trainer = dbQuery {
-        trainers.setConsent(trainerId, OffsetDateTime.now())
-        trainers.findById(trainerId) ?: throw NotFoundException("Тренер не найден.")
-    }
-
 }

@@ -26,6 +26,7 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.jackson.jackson
 import io.ktor.server.application.Application
 import io.ktor.server.application.ApplicationCall
+import io.ktor.server.application.createApplicationPlugin
 import io.ktor.server.application.install
 import io.ktor.server.application.createRouteScopedPlugin
 import com.tc.gymtrainer.config.BotAccess
@@ -103,6 +104,9 @@ private fun ApplicationCall.instant(name: String): OffsetDateTime? =
     }
 
 fun Application.trainingApi(services: TrainingServices, keys: BotAccess) {
+    install(createApplicationPlugin("PrivateApiResponses") {
+        onCall { call -> call.response.header(HttpHeaders.CacheControl, "no-store") }
+    })
     install(ContentNegotiation) {
         jackson {
             registerModule(KotlinModule.Builder().enable(KotlinFeature.StrictNullChecks).build())
@@ -138,17 +142,14 @@ fun Application.trainingApi(services: TrainingServices, keys: BotAccess) {
             post("/trainers") {
                 val input = call.receive<TrainerInput>()
                 val registration = services.trainers.registerForWeb(input.username, input.firstName, input.lastName)
-                call.response.header(HttpHeaders.CacheControl, "no-store")
                 call.respond(HttpStatusCode.Created, registration)
             }
             post("/auth/login") {
                 val input = call.receive<LoginInput>()
-                call.response.header(HttpHeaders.CacheControl, "no-store")
                 call.respond(services.loginCodes.request(input.username))
             }
             post("/auth/login/verify") {
                 val input = call.receive<VerifyCodeInput>()
-                call.response.header(HttpHeaders.CacheControl, "no-store")
                 call.respond(services.loginCodes.verify(input.challenge, input.code))
             }
             authenticate("trainer") {
@@ -161,7 +162,6 @@ fun Application.trainingApi(services: TrainingServices, keys: BotAccess) {
                     if (!call.bearer.startsWith("signup.") && call.trainer.telegramLinkedAt != null) {
                         throw AccessDeniedException("Эта ссылка предназначена для регистрации.")
                     }
-                    call.response.header(HttpHeaders.CacheControl, "no-store")
                     call.respond(services.telegramLinks.createSignupLink(call.trainer.id))
                 }
             }
@@ -179,12 +179,10 @@ private fun Route.trainingRoutes(services: TrainingServices) {
     }
     post("/trainers/me/training-bot-link") {
         if (!call.bearer.startsWith("session.")) throw AccessDeniedException("Войдите в кабинет по одноразовому коду.")
-        call.response.header(HttpHeaders.CacheControl, "no-store")
         call.respond(services.telegramLinks.createTrainingLink(call.trainer.id))
     }
     post("/trainers/me/api-key") {
         if (!call.bearer.startsWith("session.")) throw AccessDeniedException("Войдите в кабинет по одноразовому коду.")
-        call.response.header(HttpHeaders.CacheControl, "no-store")
         call.respond(mapOf("token" to services.trainers.issueApiToken(call.trainer.id)))
     }
     post("/trainers/me/token") {

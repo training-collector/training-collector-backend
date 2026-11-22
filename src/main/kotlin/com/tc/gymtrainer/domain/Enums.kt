@@ -12,7 +12,6 @@ enum class Goal(val label: String) {
 
     companion object {
         val available = entries.filter { it != REHAB }
-        fun fromLabel(label: String): Goal? = available.firstOrNull { it.label == label }
     }
 }
 

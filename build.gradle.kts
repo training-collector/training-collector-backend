@@ -56,9 +56,7 @@ dependencies {
     implementation("ch.qos.logback:logback-classic:1.5.18")
 
     // Tests
-    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.1")
     testImplementation("org.testcontainers:postgresql:1.21.4")
-    testImplementation("org.testcontainers:junit-jupiter:1.21.4")
 }
 
 tasks.test {

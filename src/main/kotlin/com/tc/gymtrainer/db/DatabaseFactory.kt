@@ -17,7 +17,6 @@ object DatabaseFactory {
     private val log = LoggerFactory.getLogger(DatabaseFactory::class.java)
 
     fun init(config: DatabaseConfig): AutoCloseable {
-        log.info("Инициализация БД: {}", config.jdbcUrl)
         val dataSource = hikari(config)
         val database = try {
             migrate(dataSource)

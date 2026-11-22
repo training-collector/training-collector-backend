@@ -33,7 +33,9 @@ class TrainingApiTest : AbstractDbTest() {
     private lateinit var base: String
 
     @BeforeEach
-    fun startHttp() {
+    fun startHttp() = startServer("SERVER_PORT")
+
+    private fun startServer(portVariable: String) {
         val port = ServerSocket(0, 1, InetAddress.getLoopbackAddress()).use { it.localPort }
         val host = "http://127.0.0.1:$port"
         base = "$host/api/v1"
@@ -50,7 +52,9 @@ class TrainingApiTest : AbstractDbTest() {
                     put("DB_USER", db.user)
                     put("DB_PASSWORD", db.password)
                     put("SERVER_HOST", "127.0.0.1")
-                    put("SERVER_PORT", port.toString())
+                    remove("PORT")
+                    remove("SERVER_PORT")
+                    put(portVariable, port.toString())
                 }
             }
             .redirectErrorStream(true).redirectOutput(log.toFile()).start()
@@ -90,6 +94,7 @@ class TrainingApiTest : AbstractDbTest() {
         val publisher = body?.let(HttpRequest.BodyPublishers::ofString) ?: HttpRequest.BodyPublishers.noBody()
         val response = http.send(builder.method(method, publisher).build(), HttpResponse.BodyHandlers.ofString())
         assertEquals(status, response.statusCode(), "$method $path")
+        assertEquals(listOf("no-store"), response.headers().allValues("Cache-Control"), "$method $path")
         return if (response.body().isBlank()) json.nullNode() else json.readTree(response.body())
     }
 
@@ -157,7 +162,8 @@ class TrainingApiTest : AbstractDbTest() {
             codes.delivered(id)
         }
         verify(id, "010101", 401)
-        stopServer(); startHttp()
+        stopServer()
+        startServer("PORT")
         val session = verify(id, "012345", 200)["token"].asText()
         verify(id, "012345", 401)
         request("GET", "/trainers/me", 401, onboarding)

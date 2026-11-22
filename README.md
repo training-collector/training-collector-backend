@@ -15,6 +15,19 @@ curl http://localhost:8080/health
 
 Для Docker выполните `docker build -t training-collector-backend .` и `docker run --env-file .env -p 8080:8080 training-collector-backend`. Внутри контейнера в `DB_JDBC_URL` укажите хост PostgreSQL, доступный из его сети. HTTP слушает `SERVER_HOST` и `SERVER_PORT`. Telegram-токены задаются только в соответствующих ботах.
 
+## Vercel
+
+Импортируйте этот репозиторий как отдельный проект. Vercel соберёт корневой Dockerfile с пресетом Container. Задайте переменные окружения перед первым деплоем.
+
+| Переменная | Значение |
+|---|---|
+| `PORT` | `8080`. Vercel направляет HTTP на этот порт, Ktor читает его при старте. Локально по-прежнему работает `SERVER_PORT`. |
+| `DB_JDBC_URL` | JDBC-адрес внешней PostgreSQL с TLS, например `jdbc:postgresql://db.example.com:5432/training?sslmode=verify-full`. Пользователю БД нужны права на создание и обновление схемы для Flyway. |
+| `DB_USER`, `DB_PASSWORD` | Учётные данные этой базы. |
+| `AUTH_SERVICE_KEY`, `TRAINING_SERVICE_KEY` | Два разных секрета. Каждый бот получает свой ключ. |
+
+Учитывайте лимит подключений PostgreSQL при настройке `DB_MAX_POOL_SIZE` (по умолчанию 5 на экземпляр). Выберите регион выполнения рядом с БД. После деплоя откройте `/health` по постоянному HTTPS-домену Production. Этот адрес должен быть доступен фронтенду и ботам без интерактивного входа в Vercel. Используйте отдельную базу и отдельные ключи для Preview.
+
 ## Тесты
 
 `./gradlew build` запускает проверки сервисов, миграций и HTTP API с Testcontainers. Нужен Docker. Сквозные проверки обоих Telegram-диалогов поднимают временную базу и настоящий HTTP-сервер. Они запускаются отдельно при наличии исходников обоих ботов в любых каталогах:

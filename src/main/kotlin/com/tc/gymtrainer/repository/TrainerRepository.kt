@@ -27,12 +27,6 @@ class TrainerRepository {
             .firstOrNull()
             ?.toTrainer()
 
-    fun findById(id: Long): Trainer? =
-        Trainers.selectAll()
-            .where { Trainers.id eq id }
-            .firstOrNull()
-            ?.toTrainer()
-
     fun insert(
         telegramUserId: Long?,
         fullName: String,
@@ -92,8 +86,4 @@ class TrainerRepository {
     fun replaceTokenHash(id: Long, currentHash: String, newHash: String) =
         Trainers.update({ (Trainers.id eq id) and (Trainers.apiTokenHash eq currentHash) }) { it[apiTokenHash] = newHash }
 
-    fun setConsent(id: Long, at: OffsetDateTime): Boolean =
-        Trainers.update({ Trainers.id eq id }) {
-            it[consentAt] = at
-        } > 0
 }
