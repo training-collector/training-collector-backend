@@ -25,3 +25,21 @@ replay_pid*
 
 # Kotlin Gradle plugin data, see https://kotlinlang.org/docs/whatsnew20.html#new-directory-for-kotlin-data-in-gradle-projects
 .kotlin/
+
+!gradle/wrapper/gradle-wrapper.jar
+.env
+.env.*
+!.env.example
+*.local
+*.pem
+*.key
+*.p12
+*.jks
+*.log
+.DS_Store
+.idea/
+*.iml
+.gradle/
+.kotlin/
+build/
+out/
