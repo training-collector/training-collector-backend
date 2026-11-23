@@ -7,6 +7,7 @@ import com.tc.gymtrainer.repository.ClientRepository
 import com.tc.gymtrainer.repository.MeasurementRepository
 import com.tc.gymtrainer.repository.TrainerRepository
 import com.tc.gymtrainer.repository.WorkoutRepository
+import com.tc.gymtrainer.service.AuthDispatch
 import com.tc.gymtrainer.service.AdminService
 import com.tc.gymtrainer.service.CatalogService
 import com.tc.gymtrainer.service.ClientService
@@ -18,7 +19,7 @@ import com.tc.gymtrainer.service.WorkoutService
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
 
-class TrainingServices {
+class TrainingServices(val dispatch: AuthDispatch = AuthDispatch()) {
     private val clientRepository = ClientRepository()
     private val workoutRepository = WorkoutRepository()
     private val measurementRepository = MeasurementRepository()
@@ -34,7 +35,7 @@ class TrainingServices {
 }
 
 fun withTrainingServices(config: AppConfig, action: (TrainingServices) -> Unit) {
-    DatabaseFactory.init(config.database).use { action(TrainingServices()) }
+    DatabaseFactory.init(config.database).use { action(TrainingServices(AuthDispatch.http(System.getenv("AUTH_DISPATCH_URL"), config.bots.authKey))) }
 }
 
 fun main() {

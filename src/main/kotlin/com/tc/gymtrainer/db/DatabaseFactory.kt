@@ -38,6 +38,9 @@ object DatabaseFactory {
             password = config.password
             driverClassName = "org.postgresql.Driver"
             maximumPoolSize = config.maxPoolSize
+            minimumIdle = 0
+            idleTimeout = 60_000
+            keepaliveTime = 0
             // IDEA starts the PostgreSQL container alongside the API and the two bots.
             initializationFailTimeout = 120_000
             isAutoCommit = false

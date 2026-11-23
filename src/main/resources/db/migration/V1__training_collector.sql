@@ -180,3 +180,23 @@ CREATE TABLE body_measurement (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_measurement_history ON body_measurement (client_id, measured_on DESC, id DESC);
+
+CREATE TABLE telegram_dialog (
+    role integer NOT NULL,
+    sender bigint NOT NULL,
+    last_update bigint,
+    last_seen timestamptz NOT NULL DEFAULT now(),
+    lease uuid,
+    lease_until timestamptz,
+    draft text,
+    pending_update bigint,
+    pending_draft text,
+    PRIMARY KEY (role, sender)
+);
+
+CREATE TABLE telegram_write_receipt (
+    key uuid PRIMARY KEY,
+    result text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX telegram_receipt_created ON telegram_write_receipt (created_at);

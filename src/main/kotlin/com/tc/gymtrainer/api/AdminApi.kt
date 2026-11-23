@@ -27,9 +27,9 @@ internal fun Route.adminRoutes(services: TrainingServices, auth: AdminAuth) {
                 call.respond(HttpStatusCode.NoContent)
             }
             get("/trainers") { call.respond(services.admin.trainers()) }
-            post("/trainers/{id}/approve") { services.admin.approve(call.id("id")); call.respond(HttpStatusCode.NoContent) }
-            post("/trainers/{id}/deactivate") { services.admin.deactivate(call.id("id")); call.respond(HttpStatusCode.NoContent) }
-            post("/trainers/{id}/activate") { services.admin.reactivate(call.id("id")); call.respond(HttpStatusCode.NoContent) }
+            post("/trainers/{id}/approve") { services.dispatch.change { services.admin.approve(call.id("id")) }; call.respond(HttpStatusCode.NoContent) }
+            post("/trainers/{id}/deactivate") { services.dispatch.change { services.admin.deactivate(call.id("id")) }; call.respond(HttpStatusCode.NoContent) }
+            post("/trainers/{id}/activate") { services.dispatch.change { services.admin.reactivate(call.id("id")) }; call.respond(HttpStatusCode.NoContent) }
             delete("/trainers/{id}") { services.admin.deleteTrainer(call.id("id")); call.respond(HttpStatusCode.NoContent) }
             get("/exercises") { call.respond(services.catalog.exercises(includeHidden = true)) }
             get("/muscle-groups") { call.respond(services.catalog.listMuscleGroups()) }

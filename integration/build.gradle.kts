@@ -14,4 +14,11 @@ dependencies {
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
-tasks.test { useJUnitPlatform() }
+tasks.test {
+    useJUnitPlatform()
+    for (module in listOf("training-collector-bot", "training-collector-auth-bot")) {
+        val bot = gradle.includedBuild(module)
+        dependsOn(bot.task(":installDist"))
+        systemProperty("$module.lib", bot.projectDir.resolve("build/install/$module/lib").absolutePath)
+    }
+}

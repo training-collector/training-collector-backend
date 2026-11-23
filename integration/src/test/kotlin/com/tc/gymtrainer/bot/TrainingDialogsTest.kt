@@ -27,7 +27,12 @@ import java.sql.DriverManager
 
 class TrainingDialogsTest {
     @Test
-    fun `coach can skip and edit details, discard drafts and record sets and measurements with buttons`() {
+    fun `coach can skip and edit details, discard drafts and record sets and measurements with buttons`() = runDialogs(false)
+
+    @Test
+    fun `webhooks preserve every dialog across cold starts and ignore redelivery`() = runDialogs(true)
+
+    private fun runDialogs(webhook: Boolean) {
         PostgreSQLContainer("postgres:16-alpine").use { pg ->
             pg.start()
             val config = AppConfig(DatabaseConfig(pg.jdbcUrl, pg.username, pg.password, 4), ServerConfig("127.0.0.1", 0))
@@ -39,7 +44,7 @@ class TrainingDialogsTest {
                 try {
                     runBlocking {
                         suspend fun installBot() {
-                            GymTrainerBot(training).install(context)
+                            if (webhook) BotRole.TRAINING.record("trainer_test_bot") else GymTrainerBot(training).install(context)
                         }
                         installBot()
                         BotRole.LOGIN_CODES.record("auth_test_bot")
@@ -54,7 +59,10 @@ class TrainingDialogsTest {
                         var updateId = 0
                         suspend fun update(body: String) {
                             val raw = """{"update_id":${++updateId},$body}"""
-                            context.asUpdateReceiver(json.decodeFromString(UpdateDeserializationStrategy, raw))
+                            val event = json.decodeFromString(UpdateDeserializationStrategy, raw)
+                            if (webhook) {
+                                repeat(2) { TrainingWebhook(training, telegram, "trainer_test_bot").process(event) }
+                            } else context.asUpdateReceiver(event)
                         }
                         suspend fun text(value: String) = update(
                             """"message":{"message_id":${++updateId},"date":1700000000,"from":$user,"chat":$chat,"text":${JsonPrimitive(value)}}"""

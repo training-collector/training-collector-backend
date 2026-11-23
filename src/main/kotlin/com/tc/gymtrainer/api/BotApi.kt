@@ -3,6 +3,8 @@ package com.tc.gymtrainer.api
 import com.tc.gymtrainer.TrainingServices
 import com.tc.gymtrainer.config.BotAccess
 import com.tc.gymtrainer.domain.*
+import com.tc.gymtrainer.service.WebhookStore
+import com.tc.gymtrainer.service.UpdateResult
 import com.tc.gymtrainer.service.BotRole
 import com.tc.gymtrainer.service.ValidationException
 import io.ktor.http.HttpStatusCode
@@ -50,9 +52,27 @@ private suspend inline fun <reified T : Any> ApplicationCall.optional(value: T?)
     if (value == null) respond(HttpStatusCode.NoContent) else respond(value)
 }
 
+private fun Route.updateRoutes(role: BotRole) {
+    val store = WebhookStore(role)
+    route("/updates/{sender}/{update}") {
+        fun ApplicationCall.updateId() = parameters["update"]?.toLongOrNull()?.takeIf { it >= 0 }
+            ?: throw ValidationException("Некорректный update_id.")
+        post("/begin") { call.respond(store.begin(call.id("sender"), call.updateId())) }
+        post("/checkpoint") {
+            store.checkpoint(call.id("sender"), call.updateId(), call.receive<UpdateResult>())
+            call.respond(HttpStatusCode.NoContent)
+        }
+        post("/finish") {
+            store.finish(call.id("sender"), call.updateId(), call.receive<UpdateResult>())
+            call.respond(HttpStatusCode.NoContent)
+        }
+    }
+}
+
 internal fun Route.botRoutes(services: TrainingServices) {
     route("/internal/v1/auth") {
         authenticate("auth-bot") {
+            updateRoutes(BotRole.LOGIN_CODES)
             post("/identity") { call.identity(BotRole.LOGIN_CODES) }
             post("/signup") {
                 val input = call.receive<Link>()
@@ -62,9 +82,10 @@ internal fun Route.botRoutes(services: TrainingServices) {
                 val sender = call.id("sender")
                 val trainer = services.trainers.findByTelegramUserId(sender)
                 val pending = trainer?.telegramLinkedAt != null && trainer.approvedAt == null && trainer.deactivatedAt == null
-                call.respond(mapOf("active" to services.loginCodes.activateChat(sender), "pending" to pending,
+                call.respond(mapOf("active" to services.dispatch.change { services.loginCodes.activateChat(sender) }, "pending" to pending,
                     "deactivated" to (trainer?.deactivatedAt != null), "username" to trainer?.username))
             }
+            post("/deliveries/delay") { call.respond(mapOf("seconds" to services.dispatch.nextDelay())) }
             post("/deliveries/next") { call.optional(services.loginCodes.nextDelivery()) }
             post("/notifications/next") { call.optional(services.admin.nextNotification()) }
             post("/notifications/{id}/complete") {
@@ -87,10 +108,11 @@ internal fun Route.botRoutes(services: TrainingServices) {
     }
     route("/internal/v1/training") {
         authenticate("training-bot") {
+            updateRoutes(BotRole.TRAINING)
             post("/identity") { call.identity(BotRole.TRAINING) }
             post("/connect") {
                 val input = call.receive<Link>()
-                call.respond(services.telegramLinks.connectTrainingBot(input.token, input.sender))
+                call.writeResult { services.telegramLinks.connectTrainingBot(input.token, input.sender) }
             }
             get("/linked/{sender}") { call.optional(services.linkedTrainer(call.id("sender"))) }
         }
@@ -103,12 +125,12 @@ internal fun Route.botRoutes(services: TrainingServices) {
                 get("/catalog/exercises/{id}") { call.respond(services.catalog.getExercise(call.id("id"))) }
                 post("/clients/profile") {
                     val input = call.receive<NewClient>()
-                    call.respond(services.clients.create(call.trainer.id, input.profile, input.measurement))
+                    call.writeResult { services.clients.create(call.trainer.id, input.profile, input.measurement) }
                 }
                 get("/measurements/{id}") { call.respond(services.measurements.get(call.trainer.id, call.id("id"))) }
                 put("/measurements/{id}/revision") {
                     val edit = call.receive<MeasurementEdit>()
-                    call.respond(services.measurements.update(call.trainer.id, call.id("id"), edit.input, edit.expected))
+                    call.writeResult { services.measurements.update(call.trainer.id, call.id("id"), edit.input, edit.expected) }
                 }
                 workoutDialogRoutes(services)
             }
@@ -120,51 +142,45 @@ private fun Route.workoutDialogRoutes(services: TrainingServices) {
     val workouts = services.workouts
     get("/clients/{id}/workouts/active") { call.optional(workouts.activeForClient(call.trainer.id, call.id("id"))) }
     delete("/clients/{id}/workouts/active/{sessionId}") {
-        call.respond(workouts.cancelActiveWorkout(call.trainer.id, call.id("id"), call.id("sessionId")))
+        call.writeResult { workouts.cancelActiveWorkout(call.trainer.id, call.id("id"), call.id("sessionId")) }
     }
-    post("/clients/{id}/workouts/start") { call.respond(workouts.startOrResume(call.trainer.id, call.id("id"))) }
+    post("/clients/{id}/workouts/start") { call.writeResult { workouts.startOrResume(call.trainer.id, call.id("id")) } }
     route("/workouts/{id}") {
         post("/skip-template") {
-            workouts.skipLegacyTemplate(call.trainer.id, call.id("id"))
-            call.respond(HttpStatusCode.NoContent)
+            call.writeResult(HttpStatusCode.NoContent) { workouts.skipLegacyTemplate(call.trainer.id, call.id("id")) }
         }
         post("/select/{catalog}") {
-            workouts.selectExercise(call.trainer.id, call.id("id"), call.id("catalog"))
-            call.respond(HttpStatusCode.NoContent)
+            call.writeResult(HttpStatusCode.NoContent) { workouts.selectExercise(call.trainer.id, call.id("id"), call.id("catalog")) }
         }
         post("/sets/{exercise}/append") {
-            workouts.appendActiveSets(call.trainer.id, call.id("id"), call.id("exercise"), call.receive<List<SetDraft>>())
-            call.respond(HttpStatusCode.NoContent)
+            call.writeResult(HttpStatusCode.NoContent) { workouts.appendActiveSets(call.trainer.id, call.id("id"), call.id("exercise"), call.receive<List<SetDraft>>()) }
         }
         post("/sets/{exercise}/undo") {
-            workouts.undoActiveSet(call.trainer.id, call.id("id"), call.id("exercise"))
-            call.respond(HttpStatusCode.NoContent)
+            call.writeResult(HttpStatusCode.NoContent) { workouts.undoActiveSet(call.trainer.id, call.id("id"), call.id("exercise")) }
         }
         post("/sets/{exercise}/finish") {
-            workouts.finishExercise(call.trainer.id, call.id("id"), call.id("exercise"))
-            call.respond(HttpStatusCode.NoContent)
+            call.writeResult(HttpStatusCode.NoContent) { workouts.finishExercise(call.trainer.id, call.id("id"), call.id("exercise")) }
         }
         post("/another") {
-            workouts.chooseAnotherExercise(call.trainer.id, call.id("id"))
-            call.respond(HttpStatusCode.NoContent)
+            call.writeResult(HttpStatusCode.NoContent) { workouts.chooseAnotherExercise(call.trainer.id, call.id("id")) }
         }
         post("/finish") {
             val minutes = call.request.queryParameters["durationMin"]?.let {
                 it.toIntOrNull() ?: throw ValidationException("Введите продолжительность в минутах целым числом.")
             }
-            call.respond(workouts.finishWorkout(call.trainer.id, call.id("id"), minutes))
+            call.writeResult { workouts.finishWorkout(call.trainer.id, call.id("id"), minutes) }
         }
         put("/date") {
             val date = call.receive<DateEdit>().date
-            call.respond(workouts.updateSession(call.trainer.id, call.id("id")) { it.copy(performedAt = it.performedAt.with(date)) })
+            call.writeResult { workouts.updateSession(call.trainer.id, call.id("id")) { it.copy(performedAt = it.performedAt.with(date)) } }
         }
         put("/duration") {
             val duration = call.receive<DurationEdit>()
-            call.respond(workouts.updateSession(call.trainer.id, call.id("id")) { it.copy(durationMin = duration.minutes) })
+            call.writeResult { workouts.updateSession(call.trainer.id, call.id("id")) { it.copy(durationMin = duration.minutes) } }
         }
         put("/note") {
             val note = call.receive<NoteEdit>()
-            call.respond(workouts.updateSession(call.trainer.id, call.id("id")) { it.copy(note = note.text) })
+            call.writeResult { workouts.updateSession(call.trainer.id, call.id("id")) { it.copy(note = note.text) } }
         }
     }
 }

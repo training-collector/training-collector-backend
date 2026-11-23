@@ -18,7 +18,7 @@ class InitialMigrationTest {
             DriverManager.getConnection(db.jdbcUrl, db.user, db.password).use { connection ->
                 connection.createStatement().use { sql ->
                     DatabaseFactory.init(db).use {
-                        for (table in listOf("trainer", "telegram_bot_identity", "muscle_group", "exercise_catalog", "goal_catalog")) {
+                        for (table in listOf("trainer", "telegram_bot_identity", "telegram_dialog", "telegram_write_receipt", "muscle_group", "exercise_catalog", "goal_catalog")) {
                             sql.executeQuery("SELECT count(*) FROM $table").use { rows ->
                                 assertTrue(rows.next())
                                 assertEquals(0, rows.getInt(1), table)
@@ -27,7 +27,7 @@ class InitialMigrationTest {
                         sql.executeUpdate("INSERT INTO goal_catalog (name) VALUES ('Выносливость')")
                     }
                     DatabaseFactory.init(db).use {
-                        sql.executeQuery("SELECT version, script FROM flyway_schema_history WHERE success AND type = 'SQL'").use { rows ->
+                        sql.executeQuery("SELECT version, script FROM flyway_schema_history WHERE success AND type = 'SQL' ORDER BY installed_rank").use { rows ->
                             assertTrue(rows.next())
                             assertEquals("1", rows.getString("version"))
                             assertEquals("V1__training_collector.sql", rows.getString("script"))

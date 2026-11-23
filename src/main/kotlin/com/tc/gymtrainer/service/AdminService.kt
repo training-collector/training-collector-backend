@@ -48,6 +48,7 @@ class AdminService {
             it[codeChatStarted] = false
             it[apiTokenHash] = null
         }
+        trainer.telegramUserId?.let { sender -> TelegramDialogs.deleteWhere { TelegramDialogs.sender eq sender } }
         WebSessions.deleteWhere { trainerId eq id }
         TelegramLinks.deleteWhere { trainerId eq id }
         LoginChallenges.deleteWhere { trainerId eq id }
@@ -96,7 +97,7 @@ class AdminService {
     }
 
     suspend fun deleteTrainer(id: Long) = dbQuery {
-        locked(id)
+        locked(id).telegramUserId?.let { sender -> TelegramDialogs.deleteWhere { TelegramDialogs.sender eq sender } }
         val clientIds = Clients.select(Clients.id).where { Clients.trainerId eq id }
         BodyMeasurements.deleteWhere { clientId inSubQuery clientIds }
         WorkoutSessions.deleteWhere { trainerId eq id }

@@ -170,7 +170,7 @@ fun Application.trainingApi(services: TrainingServices, keys: BotAccess, admin: 
             }
             post("/auth/login") {
                 val input = call.receive<LoginInput>()
-                call.respond(services.loginCodes.request(input.username, input.resend))
+                call.respond(services.dispatch.change { services.loginCodes.request(input.username, input.resend) })
             }
             post("/auth/login/verify") {
                 val input = call.receive<VerifyCodeInput>()
@@ -186,7 +186,7 @@ fun Application.trainingApi(services: TrainingServices, keys: BotAccess, admin: 
                     if (!call.bearer.startsWith("signup.") && call.trainer.telegramLinkedAt != null) {
                         throw AccessDeniedException("Эта ссылка предназначена для регистрации.")
                     }
-                    call.respond(services.telegramLinks.createSignupLink(call.trainer.id))
+                    call.respond(services.dispatch.change { services.telegramLinks.createSignupLink(call.trainer.id) })
                 }
             }
             authenticate("trainer") {
@@ -297,17 +297,15 @@ internal fun Route.workoutRoutes(workouts: WorkoutService) {
         call.respond(workouts.updateSession(call.trainer.id, call.id("workoutId"), input.performedAt, input.durationMin, input.note))
     }
     delete("/workouts/{workoutId}") {
-        workouts.deleteSession(call.trainer.id, call.id("workoutId"))
-        call.respond(HttpStatusCode.NoContent)
+        call.writeResult(HttpStatusCode.NoContent) { workouts.deleteSession(call.trainer.id, call.id("workoutId")) }
     }
     post("/workouts/{workoutId}/exercises") {
         val input = call.receive<ExerciseInput>()
         if (input.sets.isEmpty()) throw ValidationException("Добавьте хотя бы один подход.")
-        call.respond(HttpStatusCode.Created, workouts.addExercise(call.trainer.id, call.id("workoutId"), input.toDraft()))
+        call.writeResult(HttpStatusCode.Created) { workouts.addExercise(call.trainer.id, call.id("workoutId"), input.toDraft()) }
     }
     delete("/exercises/{exerciseId}") {
-        workouts.deleteExercise(call.trainer.id, call.id("exerciseId"))
-        call.respond(HttpStatusCode.NoContent)
+        call.writeResult(HttpStatusCode.NoContent) { workouts.deleteExercise(call.trainer.id, call.id("exerciseId")) }
     }
     post("/exercises/{exerciseId}/sets") {
         call.respond(HttpStatusCode.Created, workouts.addSet(call.trainer.id, call.id("exerciseId"), call.receive<SetDraft>()))
@@ -318,8 +316,7 @@ internal fun Route.workoutRoutes(workouts: WorkoutService) {
     }
     put("/sets/{setId}") {
         val set = call.receive<SetDraft>()
-        workouts.updateSet(call.trainer.id, call.id("setId"), set.weightKg, set.reps, set.restSec, set.rpe, set.durationSec)
-        call.respond(HttpStatusCode.NoContent)
+        call.writeResult(HttpStatusCode.NoContent) { workouts.updateSet(call.trainer.id, call.id("setId"), set.weightKg, set.reps, set.restSec, set.rpe, set.durationSec) }
     }
 }
 
@@ -328,13 +325,12 @@ internal fun Route.measurementRoutes(measurements: MeasurementService) {
         call.respond(measurements.update(call.trainer.id, call.id("measurementId"), call.receive<MeasurementInput>()))
     }
     delete("/measurements/{measurementId}") {
-        measurements.delete(call.trainer.id, call.id("measurementId"))
-        call.respond(HttpStatusCode.NoContent)
+        call.writeResult(HttpStatusCode.NoContent) { measurements.delete(call.trainer.id, call.id("measurementId")) }
     }
     route("/clients/{clientId}/measurements") {
         post {
             val input = call.receive<MeasurementInput>()
-            call.respond(HttpStatusCode.Created, measurements.add(call.trainer.id, call.id("clientId"), input))
+            call.writeResult(HttpStatusCode.Created) { measurements.add(call.trainer.id, call.id("clientId"), input) }
         }
         get { call.respond(measurements.history(call.trainer.id, call.id("clientId"))) }
         get("/current") { call.respond(measurements.current(call.trainer.id, call.id("clientId"))) }
