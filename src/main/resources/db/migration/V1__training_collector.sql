@@ -2,10 +2,12 @@
 CREATE TABLE trainer (
     id BIGSERIAL PRIMARY KEY,
     username VARCHAR(254) UNIQUE,
-    full_name VARCHAR(255) NOT NULL,
-    first_name VARCHAR(255),
+    first_name VARCHAR(255) NOT NULL,
     last_name VARCHAR(255),
-    phone VARCHAR(64),
+    -- Имя хранится один раз: полное вычисляется из имени и фамилии.
+    full_name VARCHAR(511) GENERATED ALWAYS AS (first_name || coalesce(' ' || last_name, '')) STORED,
+    -- IANA-пояс браузера тренера; бот считает в нём «сегодня» и даты тренировок.
+    time_zone VARCHAR(64),
     telegram_user_id BIGINT CONSTRAINT uq_trainer_telegram_user_id UNIQUE,
     telegram_linked_at TIMESTAMPTZ,
     training_bot_linked_at TIMESTAMPTZ,
@@ -14,8 +16,8 @@ CREATE TABLE trainer (
     code_chat_started BOOLEAN NOT NULL DEFAULT FALSE,
     approved_at TIMESTAMPTZ,
     deactivated_at TIMESTAMPTZ,
-    consent_at TIMESTAMPTZ,
     api_token_hash VARCHAR(64) UNIQUE,
+    api_token_expires_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -23,13 +25,20 @@ CREATE TABLE web_session (
     token_hash VARCHAR(64) PRIMARY KEY,
     trainer_id BIGINT NOT NULL REFERENCES trainer (id) ON DELETE CASCADE,
     expires_at TIMESTAMPTZ NOT NULL,
-    onboarding BOOLEAN NOT NULL DEFAULT FALSE
+    onboarding BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    ip VARCHAR(64),
+    user_agent VARCHAR(255)
 );
 CREATE INDEX idx_web_session_expiry ON web_session (expires_at);
+CREATE INDEX idx_web_session_trainer ON web_session (trainer_id);
 
 CREATE TABLE admin_session (
     token_hash VARCHAR(64) PRIMARY KEY,
-    expires_at TIMESTAMPTZ NOT NULL
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    ip VARCHAR(64),
+    user_agent VARCHAR(255)
 );
 
 CREATE TABLE telegram_bot_identity (
@@ -46,25 +55,34 @@ CREATE TABLE telegram_link (
 CREATE INDEX idx_telegram_link_trainer ON telegram_link (trainer_id);
 CREATE INDEX idx_telegram_link_expiry ON telegram_link (expires_at);
 
-CREATE TABLE login_challenge (
-    trainer_id BIGINT PRIMARY KEY REFERENCES trainer (id) ON DELETE CASCADE,
-    challenge_id VARCHAR(64) NOT NULL UNIQUE,
-    expires_at TIMESTAMPTZ NOT NULL,
-    attempts INTEGER NOT NULL DEFAULT 0,
-    code_hash VARCHAR(160),
-    delivered_at TIMESTAMPTZ,
-    heading_sent BOOLEAN NOT NULL DEFAULT FALSE,
-    next_delivery_at TIMESTAMPTZ NOT NULL
-);
-CREATE INDEX idx_code_delivery ON login_challenge (next_delivery_at) WHERE delivered_at IS NULL;
-
-CREATE TABLE trainer_access_notification (
-    id BIGSERIAL PRIMARY KEY,
+-- Запрос входа: тренер разрешает или отклоняет его кнопкой в боте авторизации.
+-- Сессию получает только браузер, который знает секрет запроса.
+CREATE TABLE login_request (
+    id VARCHAR(32) PRIMARY KEY,
     trainer_id BIGINT NOT NULL REFERENCES trainer (id) ON DELETE CASCADE,
-    active BOOLEAN NOT NULL,
-    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    secret_hash VARCHAR(64) NOT NULL UNIQUE,
+    -- Число, которое показывает сайт и повторяет сообщение в Telegram.
+    number SMALLINT NOT NULL,
+    status VARCHAR(16) NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'APPROVED', 'DENIED')),
+    ip VARCHAR(64),
+    user_agent VARCHAR(255),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL,
+    delivered_at TIMESTAMPTZ,
+    next_delivery_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX idx_access_notification_trainer ON trainer_access_notification (trainer_id, id);
+CREATE INDEX idx_login_request_trainer ON login_request (trainer_id);
+CREATE INDEX idx_login_delivery ON login_request (next_delivery_at) WHERE delivered_at IS NULL;
+
+-- Сообщение о доступе: одна строка на тренера, значение имеет только последнее состояние.
+CREATE TABLE trainer_notice (
+    id BIGSERIAL PRIMARY KEY,
+    trainer_id BIGINT NOT NULL UNIQUE REFERENCES trainer (id) ON DELETE CASCADE,
+    kind VARCHAR(16) NOT NULL CHECK (kind IN ('ACTIVATED', 'DEACTIVATED')),
+    next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX idx_trainer_notice_due ON trainer_notice (next_attempt_at);
 
 -- Справочники администратора
 CREATE TABLE goal_catalog (
@@ -76,9 +94,10 @@ CREATE UNIQUE INDEX uq_goal_name ON goal_catalog (lower(name));
 
 CREATE TABLE muscle_group (
     id BIGSERIAL PRIMARY KEY,
-    name VARCHAR(128) NOT NULL CONSTRAINT uq_muscle_group_name UNIQUE,
+    name VARCHAR(128) NOT NULL,
     description TEXT
 );
+CREATE UNIQUE INDEX uq_muscle_group_name ON muscle_group (lower(name));
 
 CREATE TABLE exercise_catalog (
     id BIGSERIAL PRIMARY KEY,
@@ -90,17 +109,16 @@ CREATE TABLE exercise_catalog (
 CREATE INDEX idx_exercise_catalog_muscle_group ON exercise_catalog (muscle_group_id);
 CREATE UNIQUE INDEX uq_live_exercise_name ON exercise_catalog (lower(name)) WHERE NOT hidden;
 
--- Подопечные и тренировки
+-- Подопечные и тренировки. История удаляется вместе с тренером и подопечным.
 CREATE TABLE client (
     id BIGSERIAL PRIMARY KEY,
-    trainer_id BIGINT NOT NULL REFERENCES trainer (id),
-    full_name VARCHAR(255) NOT NULL,
-    first_name VARCHAR(255),
+    trainer_id BIGINT NOT NULL REFERENCES trainer (id) ON DELETE CASCADE,
+    first_name VARCHAR(255) NOT NULL,
     last_name VARCHAR(255),
+    full_name VARCHAR(511) GENERATED ALWAYS AS (first_name || coalesce(' ' || last_name, '')) STORED,
     sex VARCHAR(8) CHECK (sex IN ('MALE', 'FEMALE')),
     age INTEGER CHECK (age BETWEEN 0 AND 130),
     telegram_username VARCHAR(32),
-    phone VARCHAR(64),
     goal_id BIGINT REFERENCES goal_catalog (id) ON DELETE SET NULL,
     goal VARCHAR(128),
     notes TEXT,
@@ -109,33 +127,35 @@ CREATE TABLE client (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_client_trainer_id ON client (trainer_id);
+CREATE INDEX idx_client_goal ON client (goal_id);
 
 CREATE TABLE workout_session (
     id BIGSERIAL PRIMARY KEY,
-    client_id BIGINT NOT NULL REFERENCES client (id),
-    trainer_id BIGINT NOT NULL REFERENCES trainer (id),
+    client_id BIGINT NOT NULL REFERENCES client (id) ON DELETE CASCADE,
+    trainer_id BIGINT NOT NULL REFERENCES trainer (id) ON DELETE CASCADE,
     performed_at TIMESTAMPTZ NOT NULL,
     duration_min INTEGER CHECK (duration_min > 0),
     note TEXT,
     stage VARCHAR(20) NOT NULL DEFAULT 'COMPLETED'
-        CHECK (stage IN ('CHOOSE_TEMPLATE', 'CHOOSE_EXERCISE', 'ENTER_SETS', 'REVIEW', 'COMPLETED')),
+        CHECK (stage IN ('CHOOSE_EXERCISE', 'ENTER_SETS', 'REVIEW', 'COMPLETED')),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX idx_workout_session_client_id ON workout_session (client_id);
-CREATE INDEX idx_workout_session_performed_at ON workout_session (performed_at);
+CREATE INDEX idx_workout_session_history ON workout_session (client_id, performed_at DESC, id DESC);
+CREATE INDEX idx_workout_session_trainer ON workout_session (trainer_id);
 CREATE UNIQUE INDEX uq_workout_session_active_client ON workout_session (client_id) WHERE stage <> 'COMPLETED';
 
+-- Запись тренировки хранит название упражнения и переживает его удаление из справочника.
 CREATE TABLE workout_exercise (
     id BIGSERIAL PRIMARY KEY,
     session_id BIGINT NOT NULL REFERENCES workout_session (id) ON DELETE CASCADE,
-    muscle_group_id BIGINT REFERENCES muscle_group (id),
-    exercise_catalog_id BIGINT REFERENCES exercise_catalog (id),
+    exercise_catalog_id BIGINT REFERENCES exercise_catalog (id) ON DELETE SET NULL,
     exercise_name VARCHAR(255) NOT NULL,
     order_index INTEGER NOT NULL,
     note TEXT
 );
 CREATE INDEX idx_workout_exercise_session_id ON workout_exercise (session_id);
+CREATE INDEX idx_workout_exercise_catalog ON workout_exercise (exercise_catalog_id);
 
 CREATE TABLE exercise_set (
     id BIGSERIAL PRIMARY KEY,
@@ -156,7 +176,7 @@ CREATE INDEX idx_exercise_set_exercise_id ON exercise_set (exercise_id);
 -- История замеров
 CREATE TABLE body_measurement (
     id BIGSERIAL PRIMARY KEY,
-    client_id BIGINT NOT NULL REFERENCES client (id),
+    client_id BIGINT NOT NULL REFERENCES client (id) ON DELETE CASCADE,
     measured_on DATE NOT NULL,
     height_cm NUMERIC(5, 1),
     weight_kg NUMERIC(5, 2),
@@ -177,10 +197,13 @@ CREATE TABLE body_measurement (
     right_calf_cm NUMERIC(5, 1) CHECK (right_calf_cm > 0),
     left_calf_cm NUMERIC(5, 1) CHECK (left_calf_cm > 0),
     note TEXT,
+    -- Растёт при каждой правке; защищает от одновременного редактирования.
+    version INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_measurement_history ON body_measurement (client_id, measured_on DESC, id DESC);
 
+-- Служебные таблицы Telegram: состояние диалога и квитанции записи
 CREATE TABLE telegram_dialog (
     role integer NOT NULL,
     sender bigint NOT NULL,
@@ -191,12 +214,34 @@ CREATE TABLE telegram_dialog (
     draft text,
     pending_update bigint,
     pending_draft text,
+    attempts integer NOT NULL DEFAULT 0,
     PRIMARY KEY (role, sender)
 );
+CREATE INDEX idx_telegram_dialog_seen ON telegram_dialog (last_seen);
 
 CREATE TABLE telegram_write_receipt (
     key uuid PRIMARY KEY,
     result text NOT NULL,
+    sender bigint,
     created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX telegram_receipt_created ON telegram_write_receipt (created_at);
+
+-- Счётчики лимитов запросов. Общие для всех экземпляров сервиса.
+CREATE TABLE rate_limit (
+    bucket VARCHAR(96) PRIMARY KEY,
+    window_start TIMESTAMPTZ NOT NULL,
+    hits INTEGER NOT NULL
+);
+
+-- Журнал событий безопасности и действий администратора
+CREATE TABLE audit_event (
+    id BIGSERIAL PRIMARY KEY,
+    at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    actor VARCHAR(64) NOT NULL,
+    action VARCHAR(64) NOT NULL,
+    subject VARCHAR(160),
+    ip VARCHAR(64),
+    detail VARCHAR(255)
+);
+CREATE INDEX idx_audit_event_at ON audit_event (at);

@@ -28,64 +28,60 @@ class MeasurementService(
         measurements.listByClient(clientId)
     }
 
-    suspend fun get(trainerId: Long, measurementId: Long): BodyMeasurement = dbQuery {
-        val measurement = measurements.findById(measurementId) ?: throw NotFoundException("Замер не найден.")
-        requireOwnedClient(trainerId, measurement.clientId)
-        measurement
-    }
+    suspend fun get(trainerId: Long, measurementId: Long): BodyMeasurement = dbQuery { requireOwned(trainerId, measurementId) }
 
+    /** Последнее значение каждого показателя. История идёт от новых записей к старым. */
     suspend fun current(trainerId: Long, clientId: Long): Map<String, LatestMeasurement> {
-        val result = mutableMapOf<String, LatestMeasurement>()
+        val result = LinkedHashMap<String, LatestMeasurement>()
         for (row in history(trainerId, clientId)) {
-            fun collect(name: String, value: BigDecimal?) {
-                if (value != null) result.putIfAbsent(name, LatestMeasurement(value, row.measuredOn))
+            for ((name, read) in METRICS) {
+                val value = read(row) ?: continue
+                result.putIfAbsent(name, LatestMeasurement(value, row.measuredOn))
             }
-            collect("heightCm", row.heightCm)
-            collect("weightKg", row.weightKg)
-            collect("bodyFatPct", row.bodyFatPct)
-            collect("bicepsCm", row.bicepsCm)
-            collect("waistCm", row.waistCm)
-            collect("chestCm", row.chestCm)
-            collect("hipsCm", row.hipsCm)
-            collect("thighCm", row.thighCm)
-            collect("calfCm", row.calfCm)
-            collect("rightBicepsCm", row.rightBicepsCm)
-            collect("leftBicepsCm", row.leftBicepsCm)
-            collect("rightForearmCm", row.rightForearmCm)
-            collect("leftForearmCm", row.leftForearmCm)
-            collect("backWidthCm", row.backWidthCm)
-            collect("rightThighCm", row.rightThighCm)
-            collect("leftThighCm", row.leftThighCm)
-            collect("rightCalfCm", row.rightCalfCm)
-            collect("leftCalfCm", row.leftCalfCm)
+            if (result.size == METRICS.size) break
         }
         return result
     }
 
+    /** [expectedVersion] отклоняет правку записи, которую уже изменили после её открытия. */
     suspend fun update(
-        trainerId: Long, measurementId: Long, input: MeasurementInput, expected: BodyMeasurement? = null,
+        trainerId: Long, measurementId: Long, input: MeasurementInput, expectedVersion: Int? = null,
     ): BodyMeasurement = dbQuery {
-        val existing = measurements.findById(measurementId, lock = true) ?: throw NotFoundException("Замер не найден.")
-        requireOwnedClient(trainerId, existing.clientId)
-        if (expected != null && existing != expected) throw ConflictException("Замер уже изменён. Откройте его снова.")
+        val existing = requireOwned(trainerId, measurementId, lock = true)
+        if (expectedVersion != null && existing.version != expectedVersion) throw ConflictException("Замер уже изменён. Откройте его снова.")
         validateMeasurement(input)
-        measurements.update(measurementId, input)
-        measurements.findById(measurementId) ?: throw NotFoundException("Замер не найден.")
+        measurements.update(measurementId, input, existing.version + 1)
     }
 
     suspend fun delete(trainerId: Long, measurementId: Long) = dbQuery {
-        val existing = measurements.findById(measurementId) ?: throw NotFoundException("Замер не найден.")
-        requireOwnedClient(trainerId, existing.clientId)
+        requireOwned(trainerId, measurementId)
         measurements.delete(measurementId)
     }
 
+    private fun requireOwned(trainerId: Long, measurementId: Long, lock: Boolean = false): BodyMeasurement =
+        measurements.findOwned(trainerId, measurementId, lock) ?: throw NotFoundException("Замер не найден.")
+
     private fun requireOwnedClient(trainerId: Long, clientId: Long) {
-        val client = clients.findById(clientId) ?: throw NotFoundException("Подопечный не найден.")
-        if (client.trainerId != trainerId) throw AccessDeniedException("Этот подопечный принадлежит другому тренеру.")
+        clients.findOwned(trainerId, clientId) ?: throw NotFoundException("Подопечный не найден.")
     }
 }
 
+private val METRICS: List<Pair<String, (BodyMeasurement) -> BigDecimal?>> = listOf(
+    "heightCm" to { it.heightCm }, "weightKg" to { it.weightKg }, "bodyFatPct" to { it.bodyFatPct },
+    "bicepsCm" to { it.bicepsCm }, "waistCm" to { it.waistCm }, "chestCm" to { it.chestCm },
+    "hipsCm" to { it.hipsCm }, "thighCm" to { it.thighCm }, "calfCm" to { it.calfCm },
+    "rightBicepsCm" to { it.rightBicepsCm }, "leftBicepsCm" to { it.leftBicepsCm },
+    "rightForearmCm" to { it.rightForearmCm }, "leftForearmCm" to { it.leftForearmCm },
+    "backWidthCm" to { it.backWidthCm }, "rightThighCm" to { it.rightThighCm }, "leftThighCm" to { it.leftThighCm },
+    "rightCalfCm" to { it.rightCalfCm }, "leftCalfCm" to { it.leftCalfCm },
+)
+
+/** Границы дат, которые принимают бот и API: за ними база отвечает ошибкой. */
+internal val EARLIEST_DATE: LocalDate = LocalDate.of(1900, 1, 1)
+internal val LATEST_DATE: LocalDate = LocalDate.of(2100, 12, 31)
+
 fun validateMeasurement(input: MeasurementInput) {
+    if (input.measuredOn !in EARLIEST_DATE..LATEST_DATE) throw ValidationException("Дата должна быть между 1900 и 2100 годом.")
     val lengths = listOf(
         input.heightCm, input.chestCm, input.waistCm, input.hipsCm, input.bicepsCm, input.thighCm, input.calfCm,
         input.rightBicepsCm, input.leftBicepsCm, input.rightForearmCm, input.leftForearmCm,

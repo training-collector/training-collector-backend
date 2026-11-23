@@ -4,19 +4,16 @@ import com.tc.gymtrainer.authbot.AuthBot
 import com.tc.gymtrainer.config.AppConfig
 import com.tc.gymtrainer.config.DatabaseConfig
 import com.tc.gymtrainer.config.ServerConfig
-import dev.inmo.tgbotapi.extensions.behaviour_builder.DefaultBehaviourContext
 import dev.inmo.tgbotapi.requests.send.SendTextMessage
 import dev.inmo.tgbotapi.types.buttons.ReplyKeyboardMarkup
 import dev.inmo.tgbotapi.types.buttons.ReplyKeyboardRemove
-import dev.inmo.tgbotapi.types.message.textsources.CodeTextSource
+import com.tc.gymtrainer.service.LoginState
+import com.tc.gymtrainer.service.LoginStatus
+import dev.inmo.tgbotapi.types.buttons.InlineKeyboardButtons.CallbackDataInlineKeyboardButton
+import dev.inmo.tgbotapi.types.buttons.InlineKeyboardMarkup
 import dev.inmo.tgbotapi.types.toChatId
 import dev.inmo.tgbotapi.types.update.abstracts.UpdateDeserializationStrategy
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.cancelAndJoin
-import kotlinx.coroutines.job
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
@@ -32,45 +29,38 @@ class TelegramLoginFlowTest {
     private val json = Json { ignoreUnknownKeys = true }
 
     @Test
-    fun `auth bot sends the first code and training bot is connected separately after login`() {
+    fun `auth bot confirms sign-in with buttons and training bot is connected separately after login`() {
         PostgreSQLContainer("postgres:16-alpine").use { pg ->
             pg.start()
             val db = DatabaseConfig(pg.jdbcUrl, pg.username, pg.password, 3)
             withTestPlatform(AppConfig(db, ServerConfig("127.0.0.1", 0))) { services, training, auth ->
                 DriverManager.getConnection(db.jdbcUrl, db.user, db.password).use { connection ->
                     connection.createStatement().use {
-                        it.executeUpdate("INSERT INTO trainer (telegram_user_id, full_name) VALUES (456, 'Прежний профиль')")
+                        it.executeUpdate("INSERT INTO trainer (telegram_user_id, first_name, last_name) VALUES (456, 'Прежний', 'профиль')")
                     }
                 }
                 val telegram = TestTelegram(100, "training_test_bot")
                 val authTelegram = TestTelegram(200, "auth_test_bot")
-                val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
-                val context = DefaultBehaviourContext(telegram, scope)
-                val authContext = DefaultBehaviourContext(authTelegram, scope)
                 try {
                     runBlocking {
-                        GymTrainerBot(training).install(context)
-                        val authBot = AuthBot(auth, "200:synthetic-otp-token")
-                        authBot.install(authContext)
-                        DriverManager.getConnection(db.jdbcUrl, db.user, db.password).use { connection ->
-                            connection.createStatement().use { sql ->
-                                sql.executeUpdate("TRUNCATE telegram_bot_identity")
-                                withTimeout(15_000) {
-                                    while (sql.executeQuery("SELECT count(*) FROM telegram_bot_identity").use { it.next(); it.getInt(1) } != 2) {
-                                        delay(100)
-                                    }
-                                }
-                            }
-                        }
+                        // Each bot announces its Telegram name to the platform once, at startup or deployment.
+                        training.register("training_test_bot")
+                        auth.register("auth_test_bot")
+                        val trainingBot = UpdateHandler(training, telegram, "training_test_bot")
+                        val authBot = AuthBot(auth)
+                        var updates = 0
                         val account = services.trainers.registerForWeb("coach_local", "Анна", "Тест")
                         val link = services.telegramLinks.createSignupLink(account.trainer.id)
                         assertTrue(link.url.startsWith("https://t.me/auth_test_bot?start="))
 
+                        // Telegram numbers updates in order; the bots skip an update they have already handled.
+                        @Suppress("UNUSED_PARAMETER")
                         suspend fun dispatch(id: Int, sender: Int, fields: String, auth: Boolean) {
-                            val update = """{"update_id":$id,"message":{"message_id":$id,"date":1700000000,
+                            val number = ++updates
+                            val update = json.decodeFromString(UpdateDeserializationStrategy, """{"update_id":$number,"message":{"message_id":$number,"date":1700000000,
                                 "from":{"id":$sender,"is_bot":false,"first_name":"Trainer"},
-                                "chat":{"id":$sender,"type":"private","first_name":"Trainer"},$fields}}"""
-                            (if (auth) authContext else context).asUpdateReceiver(json.decodeFromString(UpdateDeserializationStrategy, update))
+                                "chat":{"id":$sender,"type":"private","first_name":"Trainer"},$fields}}""")
+                            if (auth) authBot.handle(authTelegram, update, "auth_test_bot") else trainingBot.process(update)
                         }
                         suspend fun send(id: Int, sender: Int, fields: String, auth: Boolean = false): SendTextMessage {
                             dispatch(id, sender, fields, auth)
@@ -78,18 +68,34 @@ class TelegramLoginFlowTest {
                         }
                         fun command(name: String, argument: String = "") =
                             """"text":"$name$argument","entities":[{"type":"bot_command","offset":0,"length":${name.length}}]"""
-                        suspend fun receiveHeading() {
-                            val heading = withTimeout(5000) { authTelegram.sent.receive() }
-                            assertEquals("Код для авторизации", heading.text)
-                            assertEquals(123L.toChatId(), heading.chatId)
+                        /** The trainer presses a button under a message of the auth bot. */
+                        suspend fun pressInAuthBot(data: String, sender: Int = 123) {
+                            val number = ++updates
+                            authBot.handle(authTelegram, json.decodeFromString(UpdateDeserializationStrategy, """{"update_id":$number,
+                                "callback_query":{"id":"cb$number","from":{"id":$sender,"is_bot":false,"first_name":"Trainer"},"chat_instance":"c",
+                                "data":"$data","message":{"message_id":$number,"date":1700000000,"chat":{"id":$sender,"type":"private","first_name":"Trainer"},
+                                "from":{"id":200,"is_bot":true,"first_name":"Bot"},"text":"Вход в кабинет"}}}"""), "auth_test_bot")
                         }
-                        suspend fun receiveCode(): String {
-                            val code = withTimeout(5000) { authTelegram.sent.receive() }
-                            assertEquals(123L.toChatId(), code.chatId)
-                            assertTrue(code.text.matches(Regex("[0-9]{6}")))
-                            assertFalse(code.protectContent)
-                            assertTrue(code.textSources?.single() is CodeTextSource)
-                            return code.text
+                        /** The request the bot put in front of the trainer, with its two buttons. */
+                        suspend fun receiveLoginRequest(number: Int): List<CallbackDataInlineKeyboardButton> {
+                            val message = withTimeout(5000) { authTelegram.sent.receive() }
+                            assertEquals(123L.toChatId(), message.chatId)
+                            assertTrue(message.text.startsWith("Вход в кабинет coach_local"), message.text)
+                            assertTrue(message.text.contains("число $number"), message.text)
+                            val buttons = (message.replyMarkup as InlineKeyboardMarkup).keyboard.flatten().map { it as CallbackDataInlineKeyboardButton }
+                            assertEquals(listOf("Разрешить вход", "Отклонить вход"), buttons.map { it.text })
+                            return buttons
+                        }
+                        /** The site asks to sign in, the bot delivers it, the trainer answers. */
+                        suspend fun signIn(approve: Boolean = true): LoginStatus {
+                            val start = services.logins.request("coach_local")
+                            assertTrue(authBot.deliverNext(authTelegram))
+                            val buttons = receiveLoginRequest(start.number)
+                            pressInAuthBot(buttons[if (approve) 0 else 1].callbackData)
+                            val outcome = withTimeout(5000) { authTelegram.edited.receive() }
+                            assertTrue(outcome.text.contains(if (approve) "Вход разрешён" else "Вход отклонён"), outcome.text)
+                            assertNull(outcome.replyMarkup)
+                            return services.logins.status(start.secret)
                         }
                         val unlinkedActions = listOf(command("/start"), command("/menu"), command("/help"), """"text":"Замеры"""")
                         for ((i, entry) in unlinkedActions.withIndex()) {
@@ -98,7 +104,7 @@ class TelegramLoginFlowTest {
                             assertTrue(blocked.replyMarkup is ReplyKeyboardRemove)
                         }
                         val locked = send(1, 456, command("/clients"))
-                        assertTrue(locked.text.contains("Подключить бота для тренировок"))
+                        assertTrue(locked.text.contains("Активация не подтверждена"))
                         val payload = " " + link.url.substringAfter("?start=")
                         assertTrue(send(2, 123, command("/start", payload)).text.contains("недействительна"))
                         send(3, 456, command("/start", " login"), auth = true)
@@ -110,40 +116,39 @@ class TelegramLoginFlowTest {
                         assertTrue(send(53, 123, command("/start"), auth = true).text.contains("Логин для входа: coach_local"))
                         assertEquals(account.trainer.id, services.admin.trainers().single().id)
                         assertTrue(!authBot.deliverNext(authTelegram))
-                        services.trainers.logout(account.token)
-                        services.loginCodes.request("coach_local")
+                        services.trainers.logout(services.trainers.authenticate(account.token)!!, account.token)
+                        services.logins.request("coach_local")
                         services.admin.approve(account.trainer.id)
                         suspend fun expectAccessNotice(active: Boolean) {
                             assertTrue(authBot.deliverNextNotification(authTelegram))
                             val msg = withTimeout(5000) { authTelegram.sent.receive() }
                             assertEquals(123L.toChatId(), msg.chatId)
-                            assertEquals(if (active) "Аккаунт coach_local активирован. Доступ к кабинету открыт."
+                            assertEquals(if (active) "Аккаунт coach_local активирован. Войдите на сайте и подтвердите вход в этом чате."
                                 else "Аккаунт coach_local деактивирован. Доступ к кабинету закрыт.", msg.text)
                         }
                         services.admin.approve(account.trainer.id)
                         expectAccessNotice(true)
                         assertFalse(authBot.deliverNextNotification(authTelegram))
-                        withTimeout(5000) { while (!authBot.deliverNext(authTelegram)) delay(20) }
-                        receiveHeading()
-                        val code = receiveCode()
+                        // Approval sends no sign-in request by itself.
+                        assertFalse(authBot.deliverNext(authTelegram))
                         assertTrue(send(11, 123, command("/start", payload), auth = true).text.contains("Telegram уже привязан"))
                         assertTrue(!authBot.deliverNext(authTelegram))
                         val duplicate = services.trainers.registerForWeb("duplicate", "Тренер", "Тест")
                         val duplicateLink = services.telegramLinks.createSignupLink(duplicate.trainer.id).url.substringAfter("?start=")
                         val conflict = send(12, 123, command("/start", " $duplicateLink"), auth = true)
                         assertTrue(conflict.text.contains("Этот аккаунт Telegram уже зарегистрирован"))
-                        assertTrue(services.trainers.authenticate(duplicate.token)!!.signupTelegramInUse)
+                        assertTrue(services.trainers.authenticate(duplicate.token)!!.trainer.signupTelegramInUse)
                         assertTrue(!authBot.deliverNext(authTelegram))
-                        val session = services.loginCodes.verify(null, code, username = "coach_local")
-                        val profile = session.trainer
+                        val session = signIn()
+                        assertEquals(LoginState.APPROVED, session.status)
+                        val profile = session.trainer!!
                         assertEquals(account.trainer.id, profile.id)
                         assertEquals(123L, profile.telegramUserId)
                         assertTrue(profile.approvedAt != null)
                         assertNull(profile.trainingBotLinkedAt)
-                        assertNull(profile.phone)
-                        assertTrue(session.token.startsWith("session."))
+                        assertTrue(session.token!!.startsWith("session."))
                         assertTrue(telegram.sent.tryReceive().isFailure)
-                        assertTrue(send(5, 123, command("/clients")).text.contains("Подключить"))
+                        assertTrue(send(5, 123, command("/clients")).text.contains("Активация не подтверждена"))
                         val training = services.telegramLinks.createTrainingLink(profile.id)
                         assertTrue(training.url.startsWith("https://t.me/training_test_bot?start="))
                         val connect = command("/start", " " + training.url.substringAfter("?start="))
@@ -165,62 +170,54 @@ class TelegramLoginFlowTest {
                         assertTrue(press(25, "Помощь").text.contains("подхода"))
                         assertTrue(services.clients.list(profile.id).isEmpty())
 
-                        services.trainers.logout(session.token)
-                        val next = services.loginCodes.request("coach_local")
-                        authTelegram.failNextCode = true
+                        services.trainers.logout(services.trainers.authenticate(session.token!!)!!, session.token!!)
+                        // A send that failed is offered again later and goes out once.
+                        val retried = services.logins.request("coach_local")
+                        authTelegram.failNextLoginRequest = true
                         assertTrue(runCatching { authBot.deliverNext(authTelegram) }.exceptionOrNull() is java.io.IOException)
-                        receiveHeading()
-                        fun makeDeliveryDue(challenge: String) = DriverManager.getConnection(db.jdbcUrl, db.user, db.password).use { connection ->
-                            connection.prepareStatement("UPDATE login_challenge SET next_delivery_at = now() WHERE challenge_id = ?").use {
-                                it.setString(1, challenge)
-                                it.executeUpdate()
-                            }
-                        }
-                        makeDeliveryDue(next.challenge)
-                        assertTrue(authBot.deliverNext(authTelegram))
-                        val nextCode = receiveCode()
-                        assertTrue(authTelegram.sent.tryReceive().isFailure)
-                        val replacement = services.loginCodes.request("coach_local", resend = true)
-                        assertTrue(replacement.challenge != next.challenge)
                         assertFalse(authBot.deliverNext(authTelegram))
-                        makeDeliveryDue(replacement.challenge)
+                        DriverManager.getConnection(db.jdbcUrl, db.user, db.password).use { connection ->
+                            connection.createStatement().use { it.executeUpdate("UPDATE login_request SET next_delivery_at = now()") }
+                        }
                         assertTrue(authBot.deliverNext(authTelegram))
-                        receiveHeading()
-                        val replacementCode = receiveCode()
-                        assertTrue(runCatching { services.loginCodes.verify(next.challenge, nextCode) }.isFailure)
-                        assertEquals(profile.id, services.loginCodes.verify(null, replacementCode, "coach_local").trainer.id)
+                        val buttons = receiveLoginRequest(retried.number)
+                        assertTrue(authTelegram.sent.tryReceive().isFailure)
+                        // Another Telegram account cannot answer a request it never received.
+                        pressInAuthBot(buttons[0].callbackData, sender = 456)
+                        assertTrue(withTimeout(5000) { authTelegram.edited.receive() }.text.contains("устарел"))
+                        assertEquals(LoginState.PENDING, services.logins.status(retried.secret).status)
+                        pressInAuthBot(buttons[1].callbackData)
+                        assertTrue(withTimeout(5000) { authTelegram.edited.receive() }.text.contains("Вход отклонён"))
+                        assertEquals(LoginState.DENIED, services.logins.status(retried.secret).status)
+                        // Once the site has seen the answer, a late press finds no request.
+                        pressInAuthBot(buttons[0].callbackData)
+                        assertTrue(withTimeout(5000) { authTelegram.edited.receive() }.text.contains("устарел"))
+                        assertEquals(profile.id, signIn().trainer!!.id)
                         assertTrue(press(50, "Добавить подопечного").text.contains("Имя нового"))
                         services.admin.deactivate(profile.id)
-                        val revoked = press(51, "Анна")
-                        assertTrue(revoked.text.contains("Доступ к боту закрыт"))
+                        // The unfinished dialog went with the access: its next answer is not processed.
+                        dispatch(51, 123, """"text":"Анна"""", false)
+                        assertTrue(telegram.sent.tryReceive().isFailure)
+                        val revoked = press(51, "Подопечные")
+                        assertTrue(revoked.text.contains("Активация не подтверждена"))
                         assertTrue(revoked.replyMarkup is ReplyKeyboardRemove)
                         assertTrue(send(52, 123, command("/start"), auth = true).text.contains("деактивирован"))
-                        services.loginCodes.request("coach_local")
+                        services.logins.request("coach_local")
                         assertFalse(authBot.deliverNext(authTelegram))
-                        // A worker stopped after claiming the event. Its lease expires after the account has been reactivated.
+                        // A worker stopped after claiming the notice. The account is reactivated meanwhile.
                         val missed = auth.nextNotification()!!
-                        assertFalse(missed.active)
+                        assertEquals("DEACTIVATED", missed.kind)
                         services.admin.deactivate(profile.id)
                         services.admin.reactivate(profile.id)
                         services.admin.reactivate(profile.id)
-                        assertFalse(authBot.deliverNextNotification(authTelegram))
-                        DriverManager.getConnection(db.jdbcUrl, db.user, db.password).use { connection ->
-                            connection.prepareStatement("UPDATE trainer_access_notification SET next_attempt_at = now() WHERE id = ?").use {
-                                it.setLong(1, missed.id)
-                                assertEquals(1, it.executeUpdate())
-                            }
-                        }
-                        expectAccessNotice(false)
+                        // Only the latest state is announced. The late acknowledgement of the old notice changes nothing.
                         expectAccessNotice(true)
+                        auth.acknowledgeNotification(missed.id)
                         assertFalse(authBot.deliverNextNotification(authTelegram))
-                        services.loginCodes.request("coach_local")
-                        assertTrue(authBot.deliverNext(authTelegram))
-                        receiveHeading()
-                        assertEquals(profile.id, services.loginCodes.verify(null, receiveCode(), "coach_local").trainer.id)
+                        assertEquals(profile.id, signIn().trainer!!.id)
                         assertTrue(telegram.sent.tryReceive().isFailure)
                     }
                 } finally {
-                    runBlocking { scope.coroutineContext.job.cancelAndJoin() }
                     telegram.close()
                     authTelegram.close()
                 }

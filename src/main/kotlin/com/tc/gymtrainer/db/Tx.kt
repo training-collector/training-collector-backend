@@ -8,6 +8,10 @@ import org.jetbrains.exposed.sql.Transaction
 import org.jetbrains.exposed.sql.transactions.TransactionManager
 import org.jetbrains.exposed.sql.transactions.experimental.newSuspendedTransaction
 
+/**
+ * Lets a replay-safe bot write commit together with its receipt (see writeResult):
+ * service calls made under this element join the caller's transaction.
+ */
 internal class SharedTransaction(val tx: Transaction) : AbstractCoroutineContextElement(Key) {
     companion object Key : CoroutineContext.Key<SharedTransaction>
 }

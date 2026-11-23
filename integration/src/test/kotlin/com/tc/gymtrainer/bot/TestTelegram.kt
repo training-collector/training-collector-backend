@@ -2,6 +2,7 @@ package com.tc.gymtrainer.bot
 
 import dev.inmo.tgbotapi.bot.RequestsExecutor
 import dev.inmo.tgbotapi.requests.abstracts.Request
+import dev.inmo.tgbotapi.requests.edit.text.EditChatMessageText
 import dev.inmo.tgbotapi.requests.send.SendTextMessage
 import kotlinx.coroutines.channels.Channel
 import kotlinx.serialization.json.Json
@@ -11,19 +12,25 @@ internal class TestTelegram(private val id: Long, private val username: String) 
     private val json = Json { ignoreUnknownKeys = true }
     val messageId = AtomicInteger()
     val sent = Channel<SendTextMessage>(Channel.UNLIMITED)
-    var failNextCode = false
+    val edited = Channel<EditChatMessageText>(Channel.UNLIMITED)
+    var failNextLoginRequest = false
 
     override suspend fun <T : Any> execute(request: Request<T>): T {
         val bot = """{"id":$id,"is_bot":true,"first_name":"Bot","username":"$username"}"""
         val response = when (request) {
             is SendTextMessage -> {
-                if (failNextCode && request.text.matches(Regex("[0-9]{6}"))) {
-                    failNextCode = false
+                if (failNextLoginRequest && request.text.startsWith("Вход в кабинет")) {
+                    failNextLoginRequest = false
                     throw java.io.IOException("Test delivery interrupted")
                 }
                 val sentId = messageId.incrementAndGet()
                 sent.send(request)
                 """{"message_id":$sentId,"date":1700000000,"from":$bot,
+                    "chat":{"id":123,"type":"private","first_name":"Trainer"},"text":"OK"}"""
+            }
+            is EditChatMessageText -> {
+                edited.send(request)
+                """{"message_id":1,"date":1700000000,"from":$bot,
                     "chat":{"id":123,"type":"private","first_name":"Trainer"},"text":"OK"}"""
             }
             else -> {

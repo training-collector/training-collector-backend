@@ -24,8 +24,6 @@ fun ResultRow.toTrainer() = Trainer(
     id = this[Trainers.id].value,
     telegramUserId = this[Trainers.telegramUserId],
     fullName = this[Trainers.fullName],
-    phone = this[Trainers.phone],
-    consentAt = this[Trainers.consentAt],
     createdAt = this[Trainers.createdAt],
     username = this[Trainers.username],
     firstName = this[Trainers.firstName],
@@ -35,19 +33,18 @@ fun ResultRow.toTrainer() = Trainer(
     trainingBotLinkedAt = this[Trainers.trainingBotLinkedAt],
     signupTelegramInUse = this[Trainers.signupTelegramInUse],
     deactivatedAt = this[Trainers.deactivatedAt],
+    timeZone = this[Trainers.timeZone],
 )
 
 fun ResultRow.toClient() = Client(
     id = this[Clients.id].value,
     trainerId = this[Clients.trainerId].value,
     fullName = this[Clients.fullName],
-    firstName = this[Clients.firstName] ?: this[Clients.fullName].substringBefore(' '),
-    lastName = if (this[Clients.firstName] == null) this[Clients.fullName].substringAfter(' ', "").trim().ifEmpty { null }
-        else this[Clients.lastName],
+    firstName = this[Clients.firstName],
+    lastName = this[Clients.lastName],
     sex = this[Clients.sex],
     age = this[Clients.age],
     telegramUsername = this[Clients.telegramUsername],
-    phone = this[Clients.phone],
     goal = this[Clients.goal],
     notes = this[Clients.notes],
     status = this[Clients.status],
@@ -84,7 +81,6 @@ fun ResultRow.toWorkoutSession() = WorkoutSession(
 fun ResultRow.toWorkoutExercise() = WorkoutExercise(
     id = this[WorkoutExercises.id].value,
     sessionId = this[WorkoutExercises.sessionId].value,
-    muscleGroupId = this[WorkoutExercises.muscleGroupId]?.value,
     exerciseCatalogId = this[WorkoutExercises.exerciseCatalogId]?.value,
     exerciseName = this[WorkoutExercises.exerciseName],
     orderIndex = this[WorkoutExercises.orderIndex],
@@ -126,4 +122,5 @@ fun ResultRow.toBodyMeasurement() = BodyMeasurement(
     leftCalfCm = this[BodyMeasurements.leftCalfCm],
     note = this[BodyMeasurements.note],
     createdAt = this[BodyMeasurements.createdAt],
+    version = this[BodyMeasurements.version],
 )

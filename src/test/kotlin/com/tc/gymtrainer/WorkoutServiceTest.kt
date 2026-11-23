@@ -6,7 +6,7 @@ import com.tc.gymtrainer.domain.SetDraft
 import com.tc.gymtrainer.domain.WorkoutDraft
 import com.tc.gymtrainer.domain.WorkoutStage
 import com.tc.gymtrainer.service.ConflictException
-import com.tc.gymtrainer.service.AccessDeniedException
+import com.tc.gymtrainer.service.NotFoundException
 import com.tc.gymtrainer.service.ValidationException
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.async
@@ -35,7 +35,7 @@ class WorkoutServiceTest : AbstractDbTest() {
         workouts.finishWorkout(trainer.id, finished)
         val active = workouts.startOrResume(trainer.id, client.id).id
 
-        assertThrows(AccessDeniedException::class.java) {
+        assertThrows(NotFoundException::class.java) {
             runBlocking { workouts.cancelActiveWorkout(otherTrainer.id, client.id, active) }
         }
         assertFalse(workouts.cancelActiveWorkout(trainer.id, otherClient.id, active))
@@ -78,11 +78,11 @@ class WorkoutServiceTest : AbstractDbTest() {
         val workouts = Services.workout
         val started = (1..6).map { async { workouts.startOrResume(trainer.id, client.id).id } }.awaitAll()
         val first = started.distinct().single()
-        assertEquals(WorkoutStage.CHOOSE_EXERCISE, workouts.getSession(trainer.id, first).stage)
+        assertEquals(WorkoutStage.CHOOSE_EXERCISE, workouts.getDetail(trainer.id, first).session.stage)
         val independent = workouts.startOrResume(trainer.id, otherClient.id)
         assertTrue(first != independent.id)
-        assertThrows(AccessDeniedException::class.java) { runBlocking { workouts.finishWorkout(otherTrainer.id, first) } }
-        assertThrows(AccessDeniedException::class.java) { runBlocking { workouts.startOrResume(otherTrainer.id, client.id) } }
+        assertThrows(NotFoundException::class.java) { runBlocking { workouts.finishWorkout(otherTrainer.id, first) } }
+        assertThrows(NotFoundException::class.java) { runBlocking { workouts.startOrResume(otherTrainer.id, client.id) } }
         val catalogItem = Services.catalog.saveExercise(null, ExerciseEdit("Отжимания", Services.catalog.listMuscleGroups().single().id))
         workouts.selectExercise(trainer.id, first, catalogItem.id)
         val ex = workouts.getDetail(trainer.id, first).exercises.single().exercise.id
@@ -129,11 +129,11 @@ class WorkoutServiceTest : AbstractDbTest() {
             note = "лёгкая",
             exercises = listOf(
                 ExerciseDraft(
-                    null, null, "Жим штанги лёжа", null,
+                    null, "Жим штанги лёжа", null,
                     listOf(SetDraft(BigDecimal("60"), 10), SetDraft(BigDecimal("60"), 8)),
                 ),
                 ExerciseDraft(
-                    null, null, "Гакк-присед (новое)", null,
+                    null, "Гакк-присед (новое)", null,
                     listOf(SetDraft(null, 12)),
                 ),
             ),
@@ -149,47 +149,6 @@ class WorkoutServiceTest : AbstractDbTest() {
     }
 
     @Test
-    fun `copy last workout produces an editable draft matching the previous session`() = runBlocking {
-        val trainer = newTrainer(2002)
-        val client = newClient(trainer)
-        val first = Services.workout.create(
-            trainer.id,
-            WorkoutDraft(
-                client.id, at(2026, 1, 10), null, null,
-                listOf(
-                    ExerciseDraft(null, null, "Жим штанги лёжа", null, listOf(SetDraft(BigDecimal("60"), 10))),
-                    ExerciseDraft(null, null, "Подтягивания", null, listOf(SetDraft(null, 8))),
-                ),
-            ),
-        )
-
-        val copied = Services.workout.copyLastAsDraft(trainer.id, client.id, at(2026, 1, 12))!!
-        assertEquals(2, copied.exercises.size)
-        assertEquals("Жим штанги лёжа", copied.exercises[0].exerciseName)
-        assertEquals(0, BigDecimal("60").compareTo(copied.exercises[0].sets[0].weightKg))
-
-        // Тренер правит вес и сохраняет как новую тренировку.
-        val edited = copied.copy(
-            exercises = copied.exercises.mapIndexed { i, ex ->
-                if (i == 0) ex.copy(sets = listOf(SetDraft(BigDecimal("62.5"), 10))) else ex
-            },
-        )
-        val second = Services.workout.create(trainer.id, edited)
-        assertTrue(second.session.id != first.session.id)
-
-        val last = Services.workout.lastWorkout(trainer.id, client.id)!!
-        assertEquals(second.session.id, last.session.id)
-        assertEquals(0, BigDecimal("62.5").compareTo(last.exercises[0].sets[0].weightKg))
-    }
-
-    @Test
-    fun `copy returns null when client has no workouts`() = runBlocking {
-        val trainer = newTrainer(2003)
-        val client = newClient(trainer)
-        assertNull(Services.workout.copyLastAsDraft(trainer.id, client.id))
-    }
-
-    @Test
     fun `history filters by date range and by exercise name`() = runBlocking {
         val trainer = newTrainer(2004)
         val client = newClient(trainer)
@@ -197,14 +156,14 @@ class WorkoutServiceTest : AbstractDbTest() {
             trainer.id,
             WorkoutDraft(
                 client.id, at(2026, 1, 15), null, null,
-                listOf(ExerciseDraft(null, null, "Жим штанги лёжа", null, listOf(SetDraft(BigDecimal("50"), 10)))),
+                listOf(ExerciseDraft(null, "Жим штанги лёжа", null, listOf(SetDraft(BigDecimal("50"), 10)))),
             ),
         )
         Services.workout.create(
             trainer.id,
             WorkoutDraft(
                 client.id, at(2026, 6, 20), null, null,
-                listOf(ExerciseDraft(null, null, "Приседания со штангой", null, listOf(SetDraft(BigDecimal("100"), 5)))),
+                listOf(ExerciseDraft(null, "Приседания со штангой", null, listOf(SetDraft(BigDecimal("100"), 5)))),
             ),
         )
 
@@ -229,13 +188,13 @@ class WorkoutServiceTest : AbstractDbTest() {
             trainer.id,
             WorkoutDraft(
                 client.id, OffsetDateTime.now(), null, null,
-                listOf(ExerciseDraft(null, null, "Жим штанги лёжа", null, listOf(SetDraft(BigDecimal("60"), 10)))),
+                listOf(ExerciseDraft(null, "Жим штанги лёжа", null, listOf(SetDraft(BigDecimal("60"), 10)))),
             ),
         )
         val setId = detail.exercises[0].sets[0].id
         val sessionId = detail.session.id
 
-        Services.workout.updateSet(trainer.id, setId, BigDecimal("62.5"), 8, restSec = 90, rpe = BigDecimal("8"))
+        Services.workout.updateSet(trainer.id, setId, SetDraft(BigDecimal("62.5"), 8, restSec = 90, rpe = BigDecimal("8")))
         val afterUpdate = Services.workout.getDetail(trainer.id, sessionId).exercises[0].sets[0]
         assertEquals(0, BigDecimal("62.5").compareTo(afterUpdate.weightKg))
         assertEquals(8, afterUpdate.reps)
@@ -249,6 +208,26 @@ class WorkoutServiceTest : AbstractDbTest() {
     }
 
     @Test
+    fun `deleting a set keeps the numbering of the rest contiguous`() = runBlocking {
+        val trainer = newTrainer(2012)
+        val client = newClient(trainer)
+        val sets = List(4) { SetDraft(BigDecimal("40"), 10 + it) }
+        val detail = Services.workout.create(trainer.id, WorkoutDraft(client.id, OffsetDateTime.now(), null, null,
+            listOf(ExerciseDraft(null, "Жим штанги лёжа", null, sets))))
+        val exercise = detail.exercises.single()
+        assertEquals(listOf(1, 2, 3, 4), exercise.sets.map { it.setNumber })
+        Services.workout.deleteSet(trainer.id, exercise.sets[1].id)
+        val left = Services.workout.getDetail(trainer.id, detail.session.id).exercises.single().sets
+        assertEquals(listOf(1, 2, 3), left.map { it.setNumber })
+        assertEquals(listOf(10, 12, 13), left.map { it.reps })
+        assertEquals(4, Services.workout.addSet(trainer.id, exercise.exercise.id, SetDraft(reps = 5)).setNumber)
+        assertThrows(ValidationException::class.java) {
+            runBlocking { Services.workout.updateSession(trainer.id, detail.session.id, OffsetDateTime.parse("0001-01-01T00:00:00Z"), null, null) }
+        }
+        Unit
+    }
+
+    @Test
     fun `deleting session cascades to exercises and sets`() = runBlocking {
         val trainer = newTrainer(2006)
         val client = newClient(trainer)
@@ -256,7 +235,7 @@ class WorkoutServiceTest : AbstractDbTest() {
             trainer.id,
             WorkoutDraft(
                 client.id, OffsetDateTime.now(), null, null,
-                listOf(ExerciseDraft(null, null, "Жим штанги лёжа", null, listOf(SetDraft(BigDecimal("60"), 10)))),
+                listOf(ExerciseDraft(null, "Жим штанги лёжа", null, listOf(SetDraft(BigDecimal("60"), 10)))),
             ),
         )
         Services.workout.deleteSession(trainer.id, detail.session.id)
@@ -274,7 +253,7 @@ class WorkoutServiceTest : AbstractDbTest() {
                     trainer.id,
                     WorkoutDraft(
                         client.id, OffsetDateTime.now(), null, null,
-                        listOf(ExerciseDraft(null, null, "Жим штанги лёжа", null, listOf(SetDraft(BigDecimal("60"), 0)))),
+                        listOf(ExerciseDraft(null, "Жим штанги лёжа", null, listOf(SetDraft(BigDecimal("60"), 0)))),
                     ),
                 )
             }
@@ -291,10 +270,10 @@ class WorkoutServiceTest : AbstractDbTest() {
             owner.id,
             WorkoutDraft(
                 client.id, OffsetDateTime.now(), null, null,
-                listOf(ExerciseDraft(null, null, "Жим штанги лёжа", null, listOf(SetDraft(BigDecimal("60"), 10)))),
+                listOf(ExerciseDraft(null, "Жим штанги лёжа", null, listOf(SetDraft(BigDecimal("60"), 10)))),
             ),
         )
-        assertThrows(AccessDeniedException::class.java) {
+        assertThrows(NotFoundException::class.java) {
             runBlocking { Services.workout.getDetail(other.id, detail.session.id) }
         }
         Unit

@@ -7,31 +7,31 @@ import com.fasterxml.jackson.module.kotlin.KotlinFeature
 import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.tc.gymtrainer.TrainingServices
 import com.tc.gymtrainer.config.AdminAccess
-import com.tc.gymtrainer.service.AdminAuth
+import com.tc.gymtrainer.config.BotAccess
 import com.tc.gymtrainer.domain.ClientProfile
 import com.tc.gymtrainer.domain.ExerciseDraft
 import com.tc.gymtrainer.domain.MeasurementInput
 import com.tc.gymtrainer.domain.SetDraft
-import com.tc.gymtrainer.domain.Trainer
+import com.tc.gymtrainer.domain.Sex
 import com.tc.gymtrainer.domain.WorkoutDraft
-import com.tc.gymtrainer.service.ClientService
-import com.tc.gymtrainer.service.WorkoutService
-import com.tc.gymtrainer.service.MeasurementService
+import com.tc.gymtrainer.service.Access
 import com.tc.gymtrainer.service.AccessDeniedException
+import com.tc.gymtrainer.service.AdminAuth
 import com.tc.gymtrainer.service.BotUnavailableException
 import com.tc.gymtrainer.service.ConflictException
-import com.tc.gymtrainer.service.LoginException
+import com.tc.gymtrainer.service.LoginState
 import com.tc.gymtrainer.service.NotFoundException
+import com.tc.gymtrainer.service.TooManyRequestsException
+import com.tc.gymtrainer.service.TrainerPrincipal
 import com.tc.gymtrainer.service.ValidationException
 import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpMethod
 import io.ktor.http.HttpStatusCode
 import io.ktor.serialization.jackson.jackson
 import io.ktor.server.application.Application
 import io.ktor.server.application.ApplicationCall
-import io.ktor.server.application.createApplicationPlugin
-import io.ktor.server.application.install
 import io.ktor.server.application.createRouteScopedPlugin
-import com.tc.gymtrainer.config.BotAccess
+import io.ktor.server.application.install
 import io.ktor.server.auth.Authentication
 import io.ktor.server.auth.AuthenticationChecked
 import io.ktor.server.auth.authenticate
@@ -57,38 +57,27 @@ import java.time.format.DateTimeParseException
 
 private data class TrainerInput(val username: String, val firstName: String, val lastName: String)
 private data class TrainerNameInput(val firstName: String, val lastName: String)
-private data class LoginInput(val username: String, val resend: Boolean = false)
-private data class VerifyCodeInput(val code: String, val challenge: String? = null, val username: String? = null)
-private data class ReplaceTokenInput(val newToken: String)
-private data class ClientInput(
-    val firstName: String? = null, val lastName: String? = null, val fullName: String? = null,
-    val goal: String? = null, val notes: String? = null,
-) {
-    private var phoneIncluded = false
-    var phone: String? = null
-        set(value) {
-            field = value
-            phoneIncluded = true
-        }
+private data class TimeZoneInput(val timeZone: String)
+private data class LoginInput(val username: String)
+private data class LoginStatusInput(val secret: String)
 
-    fun namedProfile(previous: ClientProfile? = null): ClientProfile {
-        if (firstName.isNullOrBlank()) throw ValidationException("Введите имя подопечного.")
-        return (previous ?: ClientProfile(firstName)).copy(firstName = firstName, lastName = lastName,
-            phone = if (phoneIncluded) phone else previous?.phone, goal = goal, notes = notes)
-    }
-    fun legacyName(): String? {
-        if (fullName != null && (firstName != null || lastName != null)) throw ValidationException("Передайте имя и фамилию отдельно.")
-        return fullName
-    }
+/** A client card. On update the fields set only in the bot keep their values unless they are sent. */
+private data class ClientInput(
+    val firstName: String, val lastName: String? = null, val goal: String? = null, val notes: String? = null,
+    val sex: Sex? = null, val age: Int? = null, val telegramUsername: String? = null,
+    val measurement: MeasurementInput? = null,
+) {
+    fun profile(previous: ClientProfile? = null) = ClientProfile(firstName, lastName, sex ?: previous?.sex, age ?: previous?.age,
+        telegramUsername ?: previous?.telegramUsername, goal, notes)
 }
+
 private data class ExerciseInput(
-    val muscleGroupId: Long? = null,
     val exerciseName: String? = null,
     val exerciseCatalogId: Long? = null,
     val sets: List<SetDraft>,
     val note: String? = null,
 ) {
-    fun toDraft() = ExerciseDraft(muscleGroupId, exerciseCatalogId, exerciseName, note, sets)
+    fun toDraft() = ExerciseDraft(exerciseCatalogId, exerciseName, note, sets)
 }
 
 private data class SessionInput(val performedAt: OffsetDateTime, val durationMin: Int? = null, val note: String? = null)
@@ -100,21 +89,6 @@ private data class WorkoutInput(
     val note: String? = null,
 )
 
-internal val ApplicationCall.trainer: Trainer get() = checkNotNull(principal<Trainer>())
-private val ApplicationCall.bearer: String get() = request.headers[HttpHeaders.Authorization]!!.substringAfter(' ').trim()
-
-private val approvedRegistration = createRouteScopedPlugin("ApprovedRegistration") {
-    on(AuthenticationChecked) { call ->
-        val trainer = call.principal<Trainer>() ?: return@on
-        if (trainer.approvedAt == null || trainer.telegramLinkedAt == null || call.bearer.startsWith("signup.")) {
-            throw AccessDeniedException("Для доступа привяжите Telegram и войдите по одноразовому коду.")
-        }
-    }
-}
-
-internal fun ApplicationCall.id(name: String): Long =
-    parameters[name]?.toLongOrNull()?.takeIf { it > 0 } ?: throw ValidationException("Некорректный идентификатор: $name.")
-
 private fun ApplicationCall.instant(name: String): OffsetDateTime? =
     request.queryParameters[name]?.let {
         try {
@@ -124,11 +98,30 @@ private fun ApplicationCall.instant(name: String): OffsetDateTime? =
         }
     }
 
-fun Application.trainingApi(services: TrainingServices, keys: BotAccess, admin: AdminAccess = AdminAccess()) {
-    val adminAuth = AdminAuth(admin)
-    install(createApplicationPlugin("PrivateApiResponses") {
-        onCall { call -> call.response.header(HttpHeaders.CacheControl, "no-store") }
-    })
+private fun ApplicationCall.requireSession() {
+    if (principalOfTrainer.access != Access.SESSION) throw AccessDeniedException("Войдите в кабинет и подтвердите вход в Telegram.")
+}
+
+fun Application.trainingApi(services: TrainingServices, keys: BotAccess, admin: AdminAccess = AdminAccess(), clientIpHeader: String = "") {
+    val settings = services.settings
+    val limiter = services.limiter
+    val adminAuth = AdminAuth(admin, settings, services.secrets)
+    // Authenticated traffic is limited per trainer; an unfinished registration cannot open the cabinet.
+    val trainerLimit = createRouteScopedPlugin("TrainerLimit") {
+        on(AuthenticationChecked) { call ->
+            val trainer = call.principal<TrainerPrincipal>()?.trainer ?: return@on
+            limiter.checkLocal("api", trainer.id, settings.apiLimit)
+        }
+    }
+    val approvedRegistration = createRouteScopedPlugin("ApprovedRegistration") {
+        on(AuthenticationChecked) { call ->
+            val principal = call.principal<TrainerPrincipal>() ?: return@on
+            if (principal.trainer.approvedAt == null || principal.trainer.telegramLinkedAt == null || principal.access == Access.SIGNUP) {
+                throw AccessDeniedException("Для доступа привяжите Telegram и подтвердите вход в боте.")
+            }
+        }
+    }
+    install(requestLogging(settings, clientIpHeader))
     install(ContentNegotiation) {
         jackson {
             registerModule(KotlinModule.Builder().enable(KotlinFeature.StrictNullChecks).build())
@@ -146,12 +139,20 @@ fun Application.trainingApi(services: TrainingServices, keys: BotAccess, admin: 
         exception<UnsupportedMediaTypeException> { call, _ -> call.respond(HttpStatusCode.UnsupportedMediaType, mapOf("error" to "Ожидается application/json.")) }
         exception<NotFoundException> { call, e -> call.respond(HttpStatusCode.NotFound, mapOf("error" to e.message)) }
         exception<AccessDeniedException> { call, e -> call.respond(HttpStatusCode.Forbidden, mapOf("error" to e.message)) }
-        exception<LoginException> { call, e -> call.respond(HttpStatusCode.Unauthorized, mapOf("error" to e.message)) }
         exception<ConflictException> { call, e -> call.respond(HttpStatusCode.Conflict, mapOf("error" to e.message)) }
         exception<BotUnavailableException> { call, e -> call.respond(HttpStatusCode.ServiceUnavailable, mapOf("error" to e.message)) }
+        exception<RequestRejected> { call, e -> call.respond(e.status, mapOf("error" to e.message)) }
+        exception<TooManyRequestsException> { call, e ->
+            call.response.header(HttpHeaders.RetryAfter, e.retryAfterSeconds.toString())
+            call.respond(HttpStatusCode.TooManyRequests, mapOf("error" to e.message))
+        }
+        exception<Throwable> { call, e ->
+            logFailure(call, e)
+            call.respond(HttpStatusCode.InternalServerError, mapOf("error" to "Внутренняя ошибка сервера."))
+        }
     }
     install(Authentication) {
-        bearer("admin") { authenticate { if (adminAuth.valid(it.token)) it.token else null } }
+        bearer(ADMIN) { authenticate { if (adminAuth.valid(it.token)) it.token else null } }
         botAuthentication(keys, services)
         bearer("trainer") {
             realm = "Training API"
@@ -164,33 +165,44 @@ fun Application.trainingApi(services: TrainingServices, keys: BotAccess, admin: 
         get("/health") { call.respondText("OK") }
         route("/api/v1") {
             post("/trainers") {
+                limiter.check("register", call.clientIp, settings.registerLimit)
                 val input = call.receive<TrainerInput>()
-                val registration = services.trainers.registerForWeb(input.username, input.firstName, input.lastName)
+                val registration = services.trainers.registerForWeb(input.username, input.firstName, input.lastName, call.client)
+                services.housekeeping.runIfDue()
+                call.audit(services.audit, "signup.create", "trainer:${registration.trainer.id}")
                 call.respond(HttpStatusCode.Created, registration)
             }
             post("/auth/login") {
+                limiter.check("login", call.clientIp, settings.loginRequestLimit)
                 val input = call.receive<LoginInput>()
-                call.respond(services.dispatch.change { services.loginCodes.request(input.username, input.resend) })
+                val start = services.logins.request(input.username, call.client)
+                services.housekeeping.runIfDue()
+                call.audit(services.audit, "login.request", input.username.singleLine(64))
+                call.respond(start)
             }
-            post("/auth/login/verify") {
-                val input = call.receive<VerifyCodeInput>()
-                call.respond(services.loginCodes.verify(input.challenge, input.code, input.username))
+            // The page asks every few seconds whether the trainer has answered in Telegram.
+            post("/auth/login/status") {
+                limiter.checkLocal("login-status", call.clientIp, settings.loginStatusLimit)
+                val status = services.logins.status(call.receive<LoginStatusInput>().secret, call.client)
+                if (status.status == LoginState.APPROVED) call.audit(services.audit, "login.ok", "trainer:${status.trainer?.id}")
+                call.respond(status)
             }
+            // A page that failed to render reports it here: hosted logs are the only trace of it.
+            post("/client-errors") { call.acceptClientError(services) }
             authenticate("trainer") {
+                install(trainerLimit)
                 get("/trainers/me") { call.respond(call.trainer) }
                 post("/auth/logout") {
-                    services.trainers.logout(call.bearer)
+                    services.trainers.logout(call.principalOfTrainer, call.bearer)
+                    call.audit(services.audit, "session.revoke")
                     call.respond(HttpStatusCode.NoContent)
                 }
-                post("/trainers/me/telegram-link") {
-                    if (!call.bearer.startsWith("signup.") && call.trainer.telegramLinkedAt != null) {
-                        throw AccessDeniedException("Эта ссылка предназначена для регистрации.")
-                    }
-                    call.respond(services.dispatch.change { services.telegramLinks.createSignupLink(call.trainer.id) })
-                }
+                post("/trainers/me/telegram-link") { call.respond(services.telegramLinks.createSignupLink(call.trainer.id)) }
             }
             authenticate("trainer") {
+                install(trainerLimit)
                 install(approvedRegistration)
+                install(auditChanges(services.audit, setOf(HttpMethod.Delete)))
                 trainingRoutes(services)
             }
         }
@@ -200,38 +212,48 @@ fun Application.trainingApi(services: TrainingServices, keys: BotAccess, admin: 
 private fun Route.trainingRoutes(services: TrainingServices) {
     put("/trainers/me") {
         val name = call.receive<TrainerNameInput>()
-        call.respond(services.trainers.updateName(call.trainer.id, name.firstName, name.lastName))
+        val saved = services.trainers.updateName(call.trainer.id, name.firstName, name.lastName)
+        call.audit(services.audit, "trainer.rename")
+        call.respond(saved)
+    }
+    put("/trainers/me/time-zone") {
+        call.respond(services.trainers.updateTimeZone(call.trainer.id, call.receive<TimeZoneInput>().timeZone))
     }
     get("/trainers/me/bot-links") {
         call.respond(services.telegramLinks.profileLinks(call.trainer.trainingBotLinkedAt != null))
     }
     post("/trainers/me/training-bot-link") {
-        if (!call.bearer.startsWith("session.")) throw AccessDeniedException("Войдите в кабинет по одноразовому коду.")
+        call.requireSession()
         call.respond(services.telegramLinks.createTrainingLink(call.trainer.id))
     }
     post("/trainers/me/api-key") {
-        if (!call.bearer.startsWith("session.")) throw AccessDeniedException("Войдите в кабинет по одноразовому коду.")
-        call.respond(mapOf("token" to services.trainers.issueApiToken(call.trainer.id)))
+        call.requireSession()
+        val key = services.trainers.issueApiToken(call.trainer.id)
+        call.audit(services.audit, "apikey.issue")
+        call.respond(key)
     }
     post("/trainers/me/token") {
-        val replacement = call.receive<ReplaceTokenInput>().newToken
-        services.trainers.replaceApiToken(call.trainer.id, call.bearer, replacement)
-        call.respond(HttpStatusCode.NoContent)
+        if (call.principalOfTrainer.access != Access.API_KEY) throw AccessDeniedException("Передайте действующий ключ API.")
+        val key = services.trainers.rotateApiToken(call.trainer.id, call.bearer)
+        call.audit(services.audit, "apikey.rotate")
+        call.respond(key)
     }
     catalogRoutes(services)
-    clientRoutes(services.clients)
-    workoutRoutes(services.workouts)
-    measurementRoutes(services.measurements)
+    clientRoutes(services)
+    workoutRoutes(services)
+    measurementRoutes(services)
 }
 
 internal fun Route.catalogRoutes(services: TrainingServices) {
     get("/catalog/muscle-groups") { call.respond(services.catalog.listMuscleGroups()) }
     get("/catalog/muscle-groups/{groupId}/exercises") { call.respond(services.catalog.exercises(call.id("groupId"))) }
     get("/catalog/exercises") { call.respond(services.catalog.exercises()) }
+    get("/catalog/exercises/{id}") { call.respond(services.catalog.getExercise(call.id("id"))) }
     get("/catalog/goals") { call.respond(services.catalog.goals()) }
 }
 
-internal fun Route.clientRoutes(clients: ClientService) {
+internal fun Route.clientRoutes(services: TrainingServices) {
+    val clients = services.clients
     route("/clients") {
         get {
             val includeArchived = call.request.queryParameters["includeArchived"]?.let {
@@ -241,13 +263,8 @@ internal fun Route.clientRoutes(clients: ClientService) {
         }
         post {
             val input = call.receive<ClientInput>()
-            val legacy = input.legacyName()
-            val client = if (legacy != null) clients.create(call.trainer.id, legacy, input.phone, input.goal, input.notes)
-                else {
-                    if (input.lastName.isNullOrBlank()) throw ValidationException("Введите фамилию подопечного.")
-                    clients.create(call.trainer.id, input.namedProfile())
-                }
-            call.respond(HttpStatusCode.Created, client)
+            if (input.lastName.isNullOrBlank()) throw ValidationException("Введите фамилию подопечного.")
+            call.writeResult(HttpStatusCode.Created) { clients.create(call.trainer.id, input.profile(), input.measurement) }
         }
         get("/{clientId}") { call.respond(clients.getOwned(call.trainer.id, call.id("clientId"))) }
         post("/{clientId}/archive") { call.respond(clients.archive(call.trainer.id, call.id("clientId"))) }
@@ -258,16 +275,14 @@ internal fun Route.clientRoutes(clients: ClientService) {
         }
         put("/{clientId}") {
             val input = call.receive<ClientInput>()
-            val id = call.id("clientId")
-            val legacy = input.legacyName()
-            val client = if (legacy != null) clients.update(call.trainer.id, id, legacy, input.phone, input.goal, input.notes)
-                else clients.updateProfile(call.trainer.id, id) { current -> input.namedProfile(current) }
-            call.respond(client)
+            if (input.measurement != null) throw ValidationException("Замер добавляется отдельным запросом.")
+            call.respond(clients.update(call.trainer.id, call.id("clientId")) { current -> input.profile(current) })
         }
     }
 }
 
-internal fun Route.workoutRoutes(workouts: WorkoutService) {
+internal fun Route.workoutRoutes(services: TrainingServices) {
+    val workouts = services.workouts
     route("/clients/{clientId}/workouts") {
         post {
             val input = call.receive<WorkoutInput>()
@@ -294,7 +309,7 @@ internal fun Route.workoutRoutes(workouts: WorkoutService) {
     get("/workouts/{workoutId}") { call.respond(workouts.getDetail(call.trainer.id, call.id("workoutId"))) }
     put("/workouts/{workoutId}") {
         val input = call.receive<SessionInput>()
-        call.respond(workouts.updateSession(call.trainer.id, call.id("workoutId"), input.performedAt, input.durationMin, input.note))
+        call.writeResult { workouts.updateSession(call.trainer.id, call.id("workoutId"), input.performedAt, input.durationMin, input.note) }
     }
     delete("/workouts/{workoutId}") {
         call.writeResult(HttpStatusCode.NoContent) { workouts.deleteSession(call.trainer.id, call.id("workoutId")) }
@@ -316,13 +331,20 @@ internal fun Route.workoutRoutes(workouts: WorkoutService) {
     }
     put("/sets/{setId}") {
         val set = call.receive<SetDraft>()
-        call.writeResult(HttpStatusCode.NoContent) { workouts.updateSet(call.trainer.id, call.id("setId"), set.weightKg, set.reps, set.restSec, set.rpe, set.durationSec) }
+        call.writeResult(HttpStatusCode.NoContent) { workouts.updateSet(call.trainer.id, call.id("setId"), set) }
     }
 }
 
-internal fun Route.measurementRoutes(measurements: MeasurementService) {
+internal fun Route.measurementRoutes(services: TrainingServices) {
+    val measurements = services.measurements
+    get("/measurements/{measurementId}") { call.respond(measurements.get(call.trainer.id, call.id("measurementId"))) }
     put("/measurements/{measurementId}") {
-        call.respond(measurements.update(call.trainer.id, call.id("measurementId"), call.receive<MeasurementInput>()))
+        val input = call.receive<MeasurementInput>()
+        // The bot passes the version it showed, so an edit made elsewhere in the meantime is not overwritten.
+        val expected = call.request.queryParameters["expectedVersion"]?.let {
+            it.toIntOrNull() ?: throw ValidationException("expectedVersion должен быть целым числом.")
+        }
+        call.writeResult { measurements.update(call.trainer.id, call.id("measurementId"), input, expected) }
     }
     delete("/measurements/{measurementId}") {
         call.writeResult(HttpStatusCode.NoContent) { measurements.delete(call.trainer.id, call.id("measurementId")) }

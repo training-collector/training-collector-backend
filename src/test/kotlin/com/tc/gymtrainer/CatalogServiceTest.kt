@@ -1,5 +1,6 @@
 package com.tc.gymtrainer
 
+import com.tc.gymtrainer.domain.ClientProfile
 import com.tc.gymtrainer.service.*
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.*
@@ -13,11 +14,11 @@ class CatalogServiceTest : AbstractDbTest() {
         assertTrue(catalog.exercises().isEmpty())
         val goal = catalog.saveGoal(null, CatalogEdit("Баланс"))
         val trainer = newTrainer(188)
-        val client = Services.client.create(trainer.id, "Саша", null, goal.name, null)
+        val client = Services.client.create(trainer.id, ClientProfile("Саша", goal = goal.name))
         catalog.saveGoal(goal.id, CatalogEdit("Координация", hidden = true))
         assertTrue(catalog.goals().isEmpty())
         assertEquals("Координация", Services.client.getOwned(trainer.id, client.id).goal)
-        assertThrows(ValidationException::class.java) { runBlocking { Services.client.create(trainer.id, "Борис", null, "Координация", null) } }
+        assertThrows(ValidationException::class.java) { runBlocking { Services.client.create(trainer.id, ClientProfile("Борис", goal = "Координация")) } }
         catalog.deleteGoal(goal.id)
         assertEquals("Координация", Services.client.getOwned(trainer.id, client.id).goal)
         val group = catalog.createMuscleGroup("Ноги")
@@ -27,7 +28,11 @@ class CatalogServiceTest : AbstractDbTest() {
         assertThrows(NotFoundException::class.java) { runBlocking { catalog.getExercise(exercise.id) } }
         catalog.saveExercise(exercise.id, ExerciseEdit("Выпады", group.id))
         assertEquals(exercise, catalog.getExercise(exercise.id))
+        assertThrows(ConflictException::class.java) { runBlocking { catalog.createMuscleGroup("НОГИ") } }
+        assertThrows(ConflictException::class.java) { runBlocking { catalog.deleteMuscleGroup(group.id) } }
         catalog.deleteExercise(exercise.id)
         assertTrue(catalog.exercises(includeHidden = true).isEmpty())
+        catalog.deleteMuscleGroup(group.id)
+        assertTrue(catalog.listMuscleGroups().isEmpty())
     }
 }

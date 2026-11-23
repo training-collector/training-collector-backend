@@ -11,6 +11,10 @@ application { mainClass.set("com.tc.gymtrainer.AppKt") }
 
 tasks.test { useJUnitPlatform() }
 
+// Versions of all dependencies, including transitive ones, are fixed in gradle.lockfile.
+// After changing a version run: ./gradlew dependencies --write-locks
+dependencyLocking { lockAllConfigurations() }
+
 // Keep the running server's classes separate from compiler and test outputs.
 val localRunJar by tasks.registering(Jar::class) {
     from(sourceSets.main.get().output)
@@ -34,6 +38,9 @@ val exposedVersion = "0.61.0"
 val flywayVersion = "11.8.2"
 
 dependencies {
+    // Patched transitive versions: request smuggling and DoS fixes in Netty, parser DoS fixes in Jackson.
+    implementation(platform("io.netty:netty-bom:4.1.137.Final"))
+    implementation(platform("com.fasterxml.jackson:jackson-bom:2.18.11"))
     testImplementation(platform("org.junit:junit-bom:5.11.4"))
     testImplementation("org.junit.jupiter:junit-jupiter")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
@@ -45,7 +52,7 @@ dependencies {
     implementation("io.ktor:ktor-server-auth:$ktorVersion")
     implementation("io.ktor:ktor-server-content-negotiation:$ktorVersion")
     implementation("io.ktor:ktor-serialization-jackson:$ktorVersion")
-    implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310:2.18.2")
+    implementation("com.fasterxml.jackson.datatype:jackson-datatype-jsr310")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")
 
@@ -53,14 +60,14 @@ dependencies {
     implementation("org.jetbrains.exposed:exposed-core:$exposedVersion")
     implementation("org.jetbrains.exposed:exposed-jdbc:$exposedVersion")
     implementation("org.jetbrains.exposed:exposed-java-time:$exposedVersion")
-    implementation("org.postgresql:postgresql:42.7.7")
+    implementation("org.postgresql:postgresql:42.7.12")
     implementation("com.zaxxer:HikariCP:6.3.0")
     implementation("org.flywaydb:flyway-core:$flywayVersion")
     implementation("org.flywaydb:flyway-database-postgresql:$flywayVersion")
 
     // Config + logging
     implementation("com.typesafe:config:1.4.3")
-    implementation("ch.qos.logback:logback-classic:1.5.18")
+    implementation("ch.qos.logback:logback-classic:1.5.34")
 
     // Tests
     testImplementation("org.testcontainers:postgresql:1.21.4")

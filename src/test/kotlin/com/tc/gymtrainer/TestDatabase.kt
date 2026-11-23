@@ -36,7 +36,7 @@ abstract class AbstractDbTest {
             exec(
                 """
                 TRUNCATE TABLE exercise_set, workout_exercise, workout_session,
-                               body_measurement, exercise_catalog, muscle_group, client, trainer, telegram_dialog, telegram_write_receipt, telegram_bot_identity, goal_catalog, admin_session
+                               body_measurement, exercise_catalog, muscle_group, client, trainer, telegram_dialog, telegram_write_receipt, telegram_bot_identity, goal_catalog, admin_session, rate_limit, audit_event
                 RESTART IDENTITY CASCADE
                 """.trimIndent(),
             )

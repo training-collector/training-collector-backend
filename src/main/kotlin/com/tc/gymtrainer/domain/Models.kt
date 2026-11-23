@@ -13,24 +13,25 @@ data class Trainer(
     val id: Long,
     val telegramUserId: Long?,
     val fullName: String,
-    val phone: String?,
-    val consentAt: OffsetDateTime?,
     val createdAt: OffsetDateTime,
     val username: String? = null,
-    val firstName: String? = null,
+    val firstName: String,
     val lastName: String? = null,
     val telegramLinkedAt: OffsetDateTime? = null,
     val approvedAt: OffsetDateTime? = null,
     val trainingBotLinkedAt: OffsetDateTime? = null,
     val signupTelegramInUse: Boolean = false,
     val deactivatedAt: OffsetDateTime? = null,
+    /** IANA-пояс браузера тренера; бот считает в нём «сегодня» и даты тренировок. */
+    val timeZone: String? = null,
 )
+
+enum class ClientStatus { ACTIVE, ARCHIVED }
 
 data class Client(
     val id: Long,
     val trainerId: Long,
     val fullName: String,
-    val phone: String?,
     val goal: String?,
     val notes: String?,
     val status: ClientStatus,
@@ -42,10 +43,10 @@ data class Client(
     val age: Int?,
     val telegramUsername: String?,
 ) {
-    fun profile() = ClientProfile(firstName, lastName, sex, age, telegramUsername, phone, goal, notes)
+    fun profile() = ClientProfile(firstName, lastName, sex, age, telegramUsername, goal, notes)
 }
 
-enum class Sex(val label: String) { MALE("Мужской"), FEMALE("Женский") }
+enum class Sex { MALE, FEMALE }
 
 data class ClientProfile(
     val firstName: String,
@@ -53,7 +54,6 @@ data class ClientProfile(
     val sex: Sex? = null,
     val age: Int? = null,
     val telegramUsername: String? = null,
-    val phone: String? = null,
     val goal: String? = null,
     val notes: String? = null,
 ) {
@@ -74,7 +74,7 @@ data class ExerciseCatalogItem(
     val hidden: Boolean = false,
 )
 
-enum class WorkoutStage { CHOOSE_TEMPLATE, CHOOSE_EXERCISE, ENTER_SETS, REVIEW, COMPLETED }
+enum class WorkoutStage { CHOOSE_EXERCISE, ENTER_SETS, REVIEW, COMPLETED }
 
 data class WorkoutSession(
     val id: Long,
@@ -91,7 +91,6 @@ data class WorkoutSession(
 data class WorkoutExercise(
     val id: Long,
     val sessionId: Long,
-    val muscleGroupId: Long?,
     val exerciseCatalogId: Long?,
     val exerciseName: String,
     val orderIndex: Int,
@@ -133,6 +132,7 @@ data class BodyMeasurement(
     val rightForearmCm: BigDecimal? = null,
     val leftForearmCm: BigDecimal? = null,
     val backWidthCm: BigDecimal? = null,
+    val version: Int = 0,
 )
 
 // --- Агрегаты для чтения/записи целой тренировки ------------------------------
@@ -162,14 +162,13 @@ data class SetDraft(
 
 /** Черновик упражнения при вводе тренировки. */
 data class ExerciseDraft(
-    val muscleGroupId: Long?,
     val exerciseCatalogId: Long?,
     val exerciseName: String?,
     val note: String? = null,
     val sets: List<SetDraft> = emptyList(),
 )
 
-/** Черновик всей тренировки (создание/переиспользование прошлой). */
+/** Черновик всей тренировки. */
 data class WorkoutDraft(
     val clientId: Long,
     val performedAt: OffsetDateTime,

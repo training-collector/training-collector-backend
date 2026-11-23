@@ -5,7 +5,8 @@
         </encoder>
     </appender>
 
-    <logger name="Exposed" level="WARN"/>
+    <!-- Exposed logs failed statements with their values: names, notes, measurements. -->
+    <logger name="Exposed" level="ERROR"/>
     <logger name="com.zaxxer.hikari" level="WARN"/>
     <logger name="org.flywaydb" level="INFO"/>
     <logger name="io.netty" level="WARN"/>

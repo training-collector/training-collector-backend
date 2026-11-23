@@ -1,27 +1,30 @@
 package com.tc.gymtrainer.repository
 
 import com.tc.gymtrainer.db.BodyMeasurements
+import com.tc.gymtrainer.db.Clients
 import com.tc.gymtrainer.domain.BodyMeasurement
 import com.tc.gymtrainer.domain.MeasurementInput
 import org.jetbrains.exposed.sql.SortOrder
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.inSubQuery
+import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.statements.UpdateBuilder
 import org.jetbrains.exposed.sql.deleteWhere
-import org.jetbrains.exposed.sql.insertAndGetId
+import org.jetbrains.exposed.sql.insertReturning
+import org.jetbrains.exposed.sql.select
 import org.jetbrains.exposed.sql.selectAll
-import org.jetbrains.exposed.sql.update
+import org.jetbrains.exposed.sql.updateReturning
 import java.time.OffsetDateTime
 
 /** Доступ к замерам тела подопечных. Вызывать в транзакции. */
 class MeasurementRepository {
 
-    fun insert(clientId: Long, input: MeasurementInput): BodyMeasurement {
-        val id = BodyMeasurements.insertAndGetId {
+    fun insert(clientId: Long, input: MeasurementInput): BodyMeasurement =
+        BodyMeasurements.insertReturning {
             it[BodyMeasurements.clientId] = clientId
             it[createdAt] = OffsetDateTime.now()
             it.setValues(input)
-        }.value
-        return checkNotNull(findById(id))
-    }
+        }.single().toBodyMeasurement()
 
     private fun UpdateBuilder<*>.setValues(input: MeasurementInput) {
         this[BodyMeasurements.measuredOn] = input.measuredOn
@@ -46,9 +49,12 @@ class MeasurementRepository {
         this[BodyMeasurements.note] = input.note?.trim()?.ifBlank { null }
     }
 
-    fun findById(id: Long, lock: Boolean = false): BodyMeasurement? =
+    private fun ownedBy(trainerId: Long) = Clients.select(Clients.id).where { Clients.trainerId eq trainerId }
+
+    /** Замер подопечного этого тренера. Чужой и несуществующий неразличимы. */
+    fun findOwned(trainerId: Long, id: Long, lock: Boolean = false): BodyMeasurement? =
         BodyMeasurements.selectAll()
-            .where { BodyMeasurements.id eq id }
+            .where { (BodyMeasurements.id eq id) and (BodyMeasurements.clientId inSubQuery ownedBy(trainerId)) }
             .apply { if (lock) forUpdate() }
             .firstOrNull()
             ?.toBodyMeasurement()
@@ -60,9 +66,12 @@ class MeasurementRepository {
             .orderBy(BodyMeasurements.measuredOn to SortOrder.DESC, BodyMeasurements.id to SortOrder.DESC)
             .map { it.toBodyMeasurement() }
 
-    fun update(id: Long, input: MeasurementInput): Boolean =
-        BodyMeasurements.update({ BodyMeasurements.id eq id }) { it.setValues(input) } > 0
+    fun update(id: Long, input: MeasurementInput, version: Int): BodyMeasurement =
+        BodyMeasurements.updateReturning(where = { BodyMeasurements.id eq id }) {
+            it.setValues(input)
+            it[BodyMeasurements.version] = version
+        }.single().toBodyMeasurement()
 
     fun delete(id: Long): Boolean =
-        BodyMeasurements.deleteWhere { with(it) { BodyMeasurements.id eq id } } > 0
+        BodyMeasurements.deleteWhere { BodyMeasurements.id eq id } > 0
 }

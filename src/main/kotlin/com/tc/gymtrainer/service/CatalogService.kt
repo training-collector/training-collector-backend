@@ -8,6 +8,7 @@ import com.tc.gymtrainer.repository.toMuscleGroup
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.vendors.ForUpdateOption
 
 data class GoalItem(val id: Long, val name: String, val hidden: Boolean)
 data class CatalogEdit(val name: String, val description: String? = null, val hidden: Boolean = false)
@@ -48,7 +49,9 @@ class CatalogService {
         val rows = ExerciseCatalog.selectAll().where { ExerciseCatalog.hidden eq false }
         if (id != null) rows.andWhere { ExerciseCatalog.id eq id }
         else rows.andWhere { ExerciseCatalog.name.lowerCase() eq stringParam(name.orEmpty().trim()).lowerCase() }
-        return rows.forUpdate().singleOrNull()?.toExerciseCatalogItem()
+        // A shared lock keeps the exercise from changing until the workout is saved without
+        // making trainers who record the same exercise wait for each other.
+        return rows.forUpdate(ForUpdateOption.PostgreSQL.ForShare()).singleOrNull()?.toExerciseCatalogItem()
             ?: throw NotFoundException("Выберите доступное упражнение из справочника.")
     }
 
@@ -71,14 +74,21 @@ class CatalogService {
             } == 0) throw NotFoundException("Упражнение не найдено.")
             id
         }
-        ExerciseCatalog.selectAll().where { ExerciseCatalog.id eq saved }.single().toExerciseCatalogItem()
+        ExerciseCatalogItem(saved, group[MuscleGroups.id].value, name, description, edit.hidden)
     }
 
+    /** Записанные тренировки сохраняют название упражнения, ссылка на справочник обнуляется (ON DELETE SET NULL). */
     suspend fun deleteExercise(id: Long) = dbQuery {
-        ExerciseCatalog.select(ExerciseCatalog.id).where { ExerciseCatalog.id eq id }.forUpdate().singleOrNull()
-            ?: throw NotFoundException("Упражнение не найдено.")
-        WorkoutExercises.update({ WorkoutExercises.exerciseCatalogId eq id }) { it[exerciseCatalogId] = null }
-        ExerciseCatalog.deleteWhere { ExerciseCatalog.id eq id }
+        if (ExerciseCatalog.deleteWhere { ExerciseCatalog.id eq id } == 0) throw NotFoundException("Упражнение не найдено.")
+    }
+
+    suspend fun deleteMuscleGroup(id: Long) = dbQuery {
+        MuscleGroups.select(MuscleGroups.id).where { MuscleGroups.id eq id }.forUpdate().singleOrNull()
+            ?: throw NotFoundException("Категория не найдена.")
+        if (ExerciseCatalog.select(ExerciseCatalog.id).where { ExerciseCatalog.muscleGroupId eq id }.limit(1).any()) {
+            throw ConflictException("В категории есть упражнения. Сначала перенесите или удалите их.")
+        }
+        MuscleGroups.deleteWhere { MuscleGroups.id eq id }
     }
 
     suspend fun goals(includeHidden: Boolean = false) = dbQuery {
@@ -93,9 +103,11 @@ class CatalogService {
             it[Goals.name] = name
             it[hidden] = edit.hidden
         }.value else {
-            if (Goals.update({ Goals.id eq id }) { it[Goals.name] = name; it[hidden] = edit.hidden } == 0)
-                throw NotFoundException("Цель не найдена.")
-            Clients.update({ Clients.goalId eq id }) { it[goal] = name }
+            val previous = Goals.select(Goals.name).where { Goals.id eq id }.forUpdate().singleOrNull()?.get(Goals.name)
+                ?: throw NotFoundException("Цель не найдена.")
+            Goals.update({ Goals.id eq id }) { it[Goals.name] = name; it[hidden] = edit.hidden }
+            // Client cards keep a copy of the name; it changes only on a rename, not on hide or show.
+            if (previous != name) Clients.update({ Clients.goalId eq id }) { it[goal] = name }
             id
         }
         GoalItem(saved, name, edit.hidden)

@@ -1,6 +1,6 @@
 package com.tc.gymtrainer
 
-import com.tc.gymtrainer.service.AccessDeniedException
+import com.tc.gymtrainer.service.NotFoundException
 import com.tc.gymtrainer.service.ConflictException
 import com.tc.gymtrainer.service.MeasurementInput
 import com.tc.gymtrainer.service.ValidationException
@@ -40,9 +40,14 @@ class MeasurementServiceTest : AbstractDbTest() {
         assertEquals(BigDecimal("80.0"), updated.waistCm)
 
         assertThrows(ConflictException::class.java) {
-            runBlocking { Services.measurement.update(trainer.id, m.id, MeasurementInput(m.measuredOn, weightKg = BigDecimal("83")), expected = m) }
+            runBlocking { Services.measurement.update(trainer.id, m.id, MeasurementInput(m.measuredOn, weightKg = BigDecimal("83")), expectedVersion = m.version) }
         }
         assertEquals(updated, Services.measurement.history(trainer.id, client.id).single())
+        assertEquals(BigDecimal("83.00"), Services.measurement.update(trainer.id, m.id,
+            MeasurementInput(m.measuredOn, weightKg = BigDecimal("83")), expectedVersion = updated.version).weightKg)
+        assertThrows(ValidationException::class.java) {
+            runBlocking { Services.measurement.add(trainer.id, client.id, MeasurementInput(LocalDate.of(999_999, 1, 1), weightKg = BigDecimal("80"))) }
+        }
         Services.measurement.delete(trainer.id, m.id)
         assertTrue(Services.measurement.history(trainer.id, client.id).isEmpty())
     }
@@ -62,7 +67,7 @@ class MeasurementServiceTest : AbstractDbTest() {
         val owner = newTrainer(3004)
         val other = newTrainer(3005)
         val client = newClient(owner)
-        assertThrows(AccessDeniedException::class.java) {
+        assertThrows(NotFoundException::class.java) {
             runBlocking {
                 Services.measurement.add(other.id, client.id, MeasurementInput(LocalDate.now(), weightKg = BigDecimal("70")))
             }

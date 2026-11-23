@@ -3,7 +3,8 @@ package com.tc.gymtrainer
 import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.tc.gymtrainer.service.BotRole
-import com.tc.gymtrainer.service.TelegramLinkService
+import com.tc.gymtrainer.service.Secrets
+import org.jetbrains.exposed.sql.transactions.transaction
 import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
@@ -32,6 +33,8 @@ class TrainingApiTest : AbstractDbTest() {
     private val adminPassword = java.util.UUID.randomUUID().toString()
     private val authKey = java.util.UUID.randomUUID().toString()
     private val trainingKey = java.util.UUID.randomUUID().toString()
+    // The server process and the in-process services must sign tokens with the same secret.
+    private val secret = java.util.UUID.randomUUID().toString()
     private lateinit var base: String
 
     @BeforeEach
@@ -52,6 +55,7 @@ class TrainingApiTest : AbstractDbTest() {
                     put("ADMIN_PASSWORD", adminPassword)
                     put("AUTH_SERVICE_KEY", authKey)
                     put("TRAINING_SERVICE_KEY", trainingKey)
+                    put("APP_SECRET", secret)
                     put("DB_JDBC_URL", db.jdbcUrl)
                     put("DB_USER", db.user)
                     put("DB_PASSWORD", db.password)
@@ -102,13 +106,27 @@ class TrainingApiTest : AbstractDbTest() {
         return if (response.body().isBlank()) json.nullNode() else json.readTree(response.body())
     }
 
-    private val links = TelegramLinkService()
-    private val codes = TrainingServices().loginCodes
+    private val services = TrainingServices(secrets = Secrets(secret))
+    private val links = services.telegramLinks
+    private val logins = services.logins
     private var nextSender = 100_000_000L
+
+    /** The site starts a sign-in, the bot delivers it, and the trainer answers in Telegram. */
+    private fun signIn(username: String, sender: Long, approve: Boolean = true): JsonNode {
+        val start = request("POST", "/auth/login", 200, body = """{"username":"$username"}""")
+        val job = request("POST", "/internal/v1/auth/deliveries/next", 200, authKey)
+        assertEquals(start["number"].asInt(), job["number"].asInt())
+        request("POST", "/internal/v1/auth/deliveries/complete", 204, authKey, """{"id":"${job["id"].asText()}"}""")
+        val decision = request("POST", "/internal/v1/auth/logins/${job["id"].asText()}/${if (approve) "approve" else "deny"}",
+            200, authKey, """{"sender":$sender}""")
+        assertEquals(if (approve) "APPROVED" else "DENIED", decision["decision"].asText())
+        return status(start["secret"].asText())
+    }
+    private fun status(secret: String) = request("POST", "/auth/login/status", 200, body = """{"secret":"$secret"}""")
 
     private fun admin() = request("POST", "/admin/v1/login", 200, body = json.writeValueAsString(mapOf("login" to "admin-test", "password" to adminPassword)))["token"].asText()
 
-    private fun linkTelegram(token: String, sender: Long): String {
+    private fun linkTelegram(token: String, sender: Long) {
         runBlocking { BotRole.LOGIN_CODES.record("training_codes_bot") }
         val link = request("POST", "/trainers/me/telegram-link", 200, token)
         val url = link["url"].asText()
@@ -117,7 +135,6 @@ class TrainingApiTest : AbstractDbTest() {
         val profile = request("GET", "/trainers/me", 200, token)
         assertTrue(profile["approvedAt"].isNull)
         request("POST", "/admin/v1/trainers/${profile["id"]}/approve", 204, admin())
-        return runBlocking { codes.request(profile["username"].asText()).challenge }
     }
 
     private fun register(): String {
@@ -125,15 +142,14 @@ class TrainingApiTest : AbstractDbTest() {
         val name = "coach$sender"
         val signup = request("POST", "/trainers", 201, body =
             """{"firstName":"Анна","lastName":"Тест","username":"$name"}""")["token"].asText()
-        val id = linkTelegram(signup, sender)
-        runBlocking { codes.prepareDelivery(id, "012345") }
-        return request("POST", "/auth/login/verify", 200, body = """{"challenge":"$id","code":"012345"}""")["token"].asText()
+        linkTelegram(signup, sender)
+        return signIn(name, sender)["token"].asText()
     }
 
-    private fun client(token: String) = request("POST", "/clients", 201, token, """{"fullName":"Подопечный"}""")["id"].asLong()
+    private fun client(token: String) = request("POST", "/clients", 201, token, """{"firstName":"Подопечный","lastName":"Тестовый"}""")["id"].asLong()
 
     @Test
-    fun `approval code works from a login form opened before approval after leaving signup`() {
+    fun `a sign-in is allowed or rejected in Telegram and the session goes only to the asking browser`() {
         runBlocking { BotRole.LOGIN_CODES.record("training_codes_bot") }
         val signup = request("POST", "/trainers", 201, body = """{"username":"мой.логин","firstName":"Имя","lastName":"Тест"}""")
         val onboarding = signup["token"].asText()
@@ -143,23 +159,41 @@ class TrainingApiTest : AbstractDbTest() {
         assertTrue(chat["pending"].asBoolean())
         assertEquals("мой.логин", chat["username"].asText())
         request("POST", "/auth/logout", 204, onboarding)
-        val login = """{"username":"МОЙ.ЛОГИН"}"""
-        val early = request("POST", "/auth/login", 200, body = login)["challenge"].asText()
+        // Before approval the answer looks like the one for an unknown login, and nothing is sent.
+        val early = request("POST", "/auth/login", 200, body = """{"username":"МОЙ.ЛОГИН"}""")
+        val unknown = request("POST", "/auth/login", 200, body = """{"username":"nobody"}""")
+        assertEquals(early.fieldNames().asSequence().toList(), unknown.fieldNames().asSequence().toList())
+        assertEquals("PENDING", status(early["secret"].asText())["status"].asText())
+        assertEquals("PENDING", status(unknown["secret"].asText())["status"].asText())
+        assertTrue(request("POST", "/internal/v1/auth/deliveries/next", 204, authKey).isNull)
+        // Approval alone sends no request: the trainer signs in from the site.
         request("POST", "/admin/v1/trainers/${signup["trainer"]["id"]}/approve", 204, admin())
-        val job = request("POST", "/internal/v1/auth/deliveries/next", 200, authKey)["challenge"].asText()
-        assertNotEquals(early, job)
-        request("POST", "/internal/v1/auth/deliveries/prepare", 200, authKey, """{"challenge":"$job","code":"012345"}""")
-        request("POST", "/internal/v1/auth/deliveries/complete", 204, authKey, """{"challenge":"$job"}""")
-        assertEquals(job, request("POST", "/auth/login", 200, body = login)["challenge"].asText())
-        val verify = """{"username":"МОЙ.ЛОГИН","code":"012345"}"""
-        request("POST", "/auth/login/verify", 401, body = """{"username":"other","code":"012345"}""")
-        val token = request("POST", "/auth/login/verify", 200, body = verify)["token"].asText()
+        assertTrue(request("POST", "/internal/v1/auth/deliveries/next", 204, authKey).isNull)
+
+        val denied = signIn("МОЙ.ЛОГИН", 999, approve = false)
+        assertEquals("DENIED", denied["status"].asText())
+        assertTrue(denied["token"].isNull)
+        // Another Telegram account cannot answer, and the request keeps waiting for the trainer.
+        val start = request("POST", "/auth/login", 200, body = """{"username":"мой.логин"}""")
+        val job = request("POST", "/internal/v1/auth/deliveries/next", 200, authKey)
+        assertEquals("EXPIRED", request("POST", "/internal/v1/auth/logins/${job["id"].asText()}/approve", 200, authKey, """{"sender":1000}""")["decision"].asText())
+        request("POST", "/internal/v1/auth/logins/${job["id"].asText()}/later", 400, authKey, """{"sender":999}""")
+        assertEquals("PENDING", status(start["secret"].asText())["status"].asText())
+        assertEquals("APPROVED", request("POST", "/internal/v1/auth/logins/${job["id"].asText()}/approve", 200, authKey, """{"sender":999}""")["decision"].asText())
+        // A repeated press reports the decision already made.
+        assertEquals("APPROVED", request("POST", "/internal/v1/auth/logins/${job["id"].asText()}/deny", 200, authKey, """{"sender":999}""")["decision"].asText())
+        val approved = status(start["secret"].asText())
+        assertEquals("APPROVED", approved["status"].asText())
+        val token = approved["token"].asText()
         assertEquals("мой.логин", request("GET", "/trainers/me", 200, token)["username"].asText())
-        request("POST", "/auth/login/verify", 401, body = verify)
+        // The session is handed out once.
+        assertTrue(status(start["secret"].asText())["token"].isNull)
+        // The code-based routes are gone.
+        request("POST", "/auth/login/verify", 404, body = """{"username":"мой.логин","code":"012345"}""")
     }
 
     @Test
-    fun `registration telegram approval and OTP are distinct steps across restarts`() {
+    fun `registration telegram approval and sign-in are distinct steps across restarts`() {
         val signup = """{"firstName":"Анна","lastName":"Тест","username":"мой.тренер"}"""
         request("POST", "/trainers", 400, body = signup.replace("мой.тренер", "coach@example.test"))
         request("POST", "/trainers", 400, body = signup.replace("lastName", "password"))
@@ -175,32 +209,34 @@ class TrainingApiTest : AbstractDbTest() {
         request("POST", "/auth/login", 503, body = """{"username":"мой.тренер"}""")
         runBlocking { BotRole.LOGIN_CODES.record("training_codes_bot") }
         fun login() = request("POST", "/auth/login", 200, body = """{"username":"МОЙ.ТРЕНЕР"}""")
-        fun verify(id: String, code: String, status: Int) =
-            request("POST", "/auth/login/verify", status, body = """{"challenge":"$id","code":"$code"}""")
-        verify(login()["challenge"].asText(), "012345", 401)
-        val firstChallenge = linkTelegram(onboarding, 999)
+        login()
+        request("POST", "/auth/login/status", 400, body = """{"secret":"x","code":"012345"}""")
+        linkTelegram(onboarding, 999)
         val approved = request("GET", "/trainers/me", 200, onboarding)
         assertTrue(approved["approvedAt"].isTextual)
-        assertTrue(approved["phone"].isNull)
+        assertTrue(approved.path("phone").isMissingNode)
         request("GET", "/clients", 403, onboarding)
         request("POST", "/trainers/me/api-key", 403, onboarding)
         request("POST", "/trainers/me/training-bot-link", 403, onboarding)
-        val challenge = login()
-        assertEquals("https://t.me/training_codes_bot?start=login", challenge["botUrl"].asText())
-        val id = challenge["challenge"].asText()
-        assertEquals(firstChallenge, id)
-        assertEquals(id, login()["challenge"].asText())
+        val start = login()
+        assertEquals("https://t.me/training_codes_bot", start["botUrl"].asText())
         runBlocking {
-            assertTrue(!codes.activateChat(998))
-            assertEquals(999L, codes.nextDelivery()!!.telegramId)
-            codes.prepareDelivery(id, "012345")
-            codes.delivered(id)
+            assertTrue(!logins.activateChat(998))
+            val job = logins.nextDelivery()!!
+            assertEquals(999L, job.telegramId)
+            assertEquals(start["number"].asInt(), job.number)
+            logins.delivered(job.id)
+            assertEquals(com.tc.gymtrainer.service.LoginDecision.APPROVED, logins.decide(job.id, 999, approve = true))
         }
-        verify(id, "010101", 401)
+        // The answer given in Telegram survives a restart of the server.
         stopServer()
         startServer("PORT")
-        val session = verify(id, "012345", 200)["token"].asText()
-        verify(id, "012345", 401)
+        val session = status(start["secret"].asText())["token"].asText()
+        assertTrue(session.startsWith("session."))
+        assertTrue(status(start["secret"].asText())["token"].isNull)
+        // A token this server did not issue is refused, including one in the pre-signature format.
+        request("GET", "/trainers/me", 401, "session.abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG")
+        request("GET", "/trainers/me", 401, session.dropLast(1) + if (session.endsWith("A")) "B" else "A")
         request("GET", "/trainers/me", 401, onboarding)
         request("GET", "/clients", 200, session)
         assertTrue(request("GET", "/trainers/me", 200, session)["trainingBotLinkedAt"].isNull)
@@ -226,24 +262,30 @@ class TrainingApiTest : AbstractDbTest() {
     fun `trainer can replace an API key without changing the profile or clients`() {
         fun apiKey(): String {
             val session = register()
-            return request("POST", "/trainers/me/api-key", 200, session)["token"].asText()
+            val issued = request("POST", "/trainers/me/api-key", 200, session)
+            assertTrue(issued["expiresAt"].isTextual)
+            // Only the key itself can ask for its replacement.
+            request("POST", "/trainers/me/token", 403, session)
+            return issued["token"].asText()
         }
         val old = apiKey()
         val other = apiKey()
         val clientId = client(old)
         request("POST", "/trainers/me/training-bot-link", 403, old)
         val profile = request("GET", "/trainers/me", 200, old)
-        val replacement = java.util.Base64.getUrlEncoder().withoutPadding()
-            .encodeToString(ByteArray(32).also(java.security.SecureRandom()::nextBytes))
         val route = "/trainers/me/token"
-        fun body(token: String) = """{"newToken":"$token"}"""
-        request("POST", route, 401, body = body(replacement))
-        request("POST", route, 400, old, body(other))
-        request("POST", route, 400, old, body("short"))
-        request("POST", route, 204, old, body(replacement))
+        request("POST", route, 401)
+        // The server generates the new key; a client can no longer choose it.
+        val chosen = "a".repeat(43)
+        val replacement = request("POST", route, 200, old, """{"newToken":"$chosen"}""")["token"].asText()
+        assertNotEquals(chosen, replacement)
+        request("GET", "/trainers/me", 401, chosen)
+        assertNotEquals(old, replacement)
         request("GET", "/trainers/me", 401, old)
+        request("POST", route, 401, old)
         assertEquals(profile, request("GET", "/trainers/me", 200, replacement))
         assertEquals(clientId, request("GET", "/clients", 200, replacement).single()["id"].asLong())
+        assertTrue(request("GET", "/clients", 200, other).isEmpty)
     }
 
     @Test
@@ -273,18 +315,26 @@ class TrainingApiTest : AbstractDbTest() {
     fun `web client names preserve their parts and Telegram profile details`() {
         val token = register()
         request("POST", "/clients", 400, token, """{"firstName":"Анна"}""")
+        request("POST", "/clients", 400, token, """{"fullName":"Анна де Соуза"}""")
         val client = request("POST", "/clients", 201, token, """{"firstName":"Анна Мария","lastName":"де Соуза"}""")
         val id = client["id"].asLong()
         assertEquals("Анна Мария де Соуза", client["fullName"].asText())
-        runBlocking { Services.client.updateProfile(client["trainerId"].asLong(), id) { it.copy(age = 26, telegramUsername = "coach_client", phone = "+123456") } }
+        assertTrue(client.path("phone").isMissingNode)
+        runBlocking { Services.client.update(client["trainerId"].asLong(), id) { it.copy(age = 26, telegramUsername = "coach_client") } }
         val updated = request("PUT", "/clients/$id", 200, token, """{"firstName":"Анна Мария","lastName":"Иванова"}""")
         assertEquals("Анна Мария", updated["firstName"].asText())
         assertEquals("Иванова", updated["lastName"].asText())
+        assertEquals("Анна Мария Иванова", updated["fullName"].asText())
         assertEquals(26, updated["age"].asInt())
         assertEquals("coach_client", updated["telegramUsername"].asText())
-        assertEquals("+123456", updated["phone"].asText())
-        val cleared = request("PUT", "/clients/$id", 200, token, """{"firstName":"Анна Мария","lastName":"Иванова","phone":null}""")
-        assertTrue(cleared["phone"].isNull)
+        assertEquals(updated, request("GET", "/clients/$id", 200, token))
+        // The phone field left the interfaces and the API with them.
+        request("PUT", "/clients/$id", 400, token, """{"firstName":"Анна Мария","lastName":"Иванова","phone":null}""")
+        // The bot creates a client with the rest of the profile and the first measurement in one request.
+        val full = request("POST", "/clients", 201, token,
+            """{"firstName":"Олег","lastName":"Смирнов","sex":"MALE","age":31,"telegramUsername":"oleg","measurement":{"measuredOn":"2026-11-20","weightKg":81.5}}""")
+        assertEquals("MALE", full["sex"].asText())
+        assertEquals(81.5, request("GET", "/clients/${full["id"]}/measurements/current", 200, token)["weightKg"]["value"].asDouble())
     }
 
     @Test
@@ -330,6 +380,14 @@ class TrainingApiTest : AbstractDbTest() {
         val cleared = request("PUT", "$groups/$id", 200, admin, """{"name":"Грудные мышцы","description":"  "}""")
         assertTrue(cleared.path("description").isNull)
         assertEquals(cleared, request("GET", groups, 200, admin).single { it["id"].asLong() == id })
+        // Names are unique regardless of case, and only an empty category can be deleted.
+        request("POST", groups, 409, admin, """{"name":"спина"}""")
+        request("DELETE", "$groups/$id", 409, admin)
+        request("DELETE", "/admin/v1/exercises/${exercise["id"]}", 204, admin)
+        request("DELETE", "$groups/$id", 401, owner)
+        request("DELETE", "$groups/$id", 204, admin)
+        request("DELETE", "$groups/$id", 404, admin)
+        assertTrue(request("GET", "/catalog/muscle-groups", 200, owner).none { it["id"].asLong() == id })
     }
 
     @Test
@@ -366,7 +424,7 @@ class TrainingApiTest : AbstractDbTest() {
         request("POST", path, 404, owner, workout)
         request("DELETE", edit, 204, admin)
         val history = request("GET", "/workouts/$session", 200, owner)["exercises"].single()
-        assertEquals(group, history["exercise"]["muscleGroupId"].asLong())
+        assertTrue(history["exercise"]["exerciseCatalogId"].isNull)
         assertEquals("Планка", history["exercise"]["exerciseName"].asText())
         assertEquals(45, history["sets"].single()["durationSec"].asInt())
         val goals = "/admin/v1/goals"
@@ -399,15 +457,17 @@ class TrainingApiTest : AbstractDbTest() {
         runBlocking { BotRole.TRAINING.record("training_bot") }
         val link = request("POST", "/trainers/me/training-bot-link", 200, session)["url"].asText()
         runBlocking { links.connectTrainingBot(link.substringAfter("?start="), sender) }
-        val oldCode = runBlocking { codes.request(active["username"].asText()).challenge }
-        runBlocking { codes.prepareDelivery(oldCode, "123456") }
+        val username = active["username"].asText()
+        // A request answered in Telegram but not yet picked up by the browser.
+        val pending = request("POST", "/auth/login", 200, body = """{"username":"$username"}""")
+        runBlocking { logins.decide(logins.nextDelivery()!!.id, sender, approve = true) }
         request("POST", "$path/$id/deactivate", 204, admin)
         request("GET", "/clients", 401, session)
         request("GET", "/clients", 401, key)
         request("GET", "/internal/v1/training/chats/$sender/clients", 401, trainingKey)
-        request("POST", "/auth/login/verify", 401, body = """{"challenge":"$oldCode","code":"123456"}""")
+        assertTrue(status(pending["secret"].asText())["token"].isNull)
         assertTrue(request("GET", path, 200, admin).single()["deactivatedAt"].isTextual)
-        assertTrue(runBlocking { codes.nextDelivery() } == null)
+        assertTrue(runBlocking { logins.nextDelivery() } == null)
         request("POST", "$path/$id/approve", 409, admin)
         request("POST", "$path/$id/activate", 401, session)
         request("POST", "$path/$id/activate", 204, admin)
@@ -417,8 +477,50 @@ class TrainingApiTest : AbstractDbTest() {
         request("GET", "/internal/v1/training/chats/$sender/clients", 401, trainingKey)
         request("DELETE", "$path/$id", 204, admin)
         assertTrue(request("GET", path, 200, admin).isEmpty)
+        // The trainer's clients and their history went with the account.
+        transaction {
+            for (table in listOf("client", "body_measurement", "workout_session")) {
+                exec("SELECT count(*) FROM $table") { rows -> rows.next(); assertEquals(0, rows.getInt(1), table) }
+            }
+            // Administrator actions and logins are journaled.
+            val actions = exec("SELECT action || ' ' || coalesce(subject, '') FROM audit_event ORDER BY id") { rows ->
+                buildList { while (rows.next()) add(rows.getString(1)) }
+            }!!
+            assertTrue("admin.login.ok " in actions, actions.toString())
+            assertTrue("admin.login.fail " in actions, actions.toString())
+            assertTrue("post /admin/v1/trainers/$id/deactivate" in actions, actions.toString())
+            assertTrue("delete /admin/v1/trainers/$id" in actions, actions.toString())
+            assertTrue(actions.any { it.startsWith("login.ok trainer:") }, actions.toString())
+            assertTrue(actions.any { it.startsWith("login.approve telegram:") }, actions.toString())
+        }
         request("POST", "/admin/v1/logout", 204, admin)
         request("GET", path, 401, admin)
+    }
+
+    @Test
+    fun `anonymous routes are limited per client address and oversized bodies are refused`() {
+        val wrong = """{"login":"admin-test","password":"wrong"}"""
+        repeat(5) { request("POST", "/admin/v1/login", 401, body = wrong) }
+        // The sixth attempt within the window is refused before the password is checked.
+        request("POST", "/admin/v1/login", 429, body = wrong)
+        request("POST", "/admin/v1/login", 429, body = json.writeValueAsString(mapOf("login" to "admin-test", "password" to adminPassword)))
+        // The server answers before it reads the body, so the connection may also be closed mid-upload.
+        val oversized = runCatching {
+            request("POST", "/trainers", 413, body = """{"username":"big","firstName":"${"a".repeat(1_100_000)}","lastName":"Тест"}""")
+        }
+        assertTrue(oversized.isSuccess || oversized.exceptionOrNull() is IOException, oversized.toString())
+        request("POST", "/client-errors", 204, body = """{"message":"TypeError: x is undefined","source":"#clients","stack":"at render"}""")
+        request("POST", "/client-errors", 400, body = """{"text":"unknown field"}""")
+    }
+
+    @Test
+    fun `the cabinet stores the trainer's time zone for the bot`() {
+        val token = register()
+        assertTrue(request("GET", "/trainers/me", 200, token)["timeZone"].isNull)
+        val saved = request("PUT", "/trainers/me/time-zone", 200, token, """{"timeZone":"Asia/Novosibirsk"}""")
+        assertEquals("Asia/Novosibirsk", saved["timeZone"].asText())
+        request("PUT", "/trainers/me/time-zone", 400, token, """{"timeZone":"Mars/Olympus"}""")
+        assertEquals(saved, request("GET", "/trainers/me", 200, token))
     }
 
     @Test
@@ -429,7 +531,7 @@ class TrainingApiTest : AbstractDbTest() {
         val path = "/clients/$clientId"
         val group = runBlocking { Services.catalog.createMuscleGroup("Ноги").id }
         runBlocking { Services.catalog.saveExercise(null, com.tc.gymtrainer.service.ExerciseEdit("Жим", group)) }
-        val exercise = """{"muscleGroupId":$group,"exerciseName":"Жим","sets":[{"reps":8},{"durationSec":20}]}"""
+        val exercise = """{"exerciseName":"Жим","sets":[{"reps":8},{"durationSec":20}]}"""
         val workout = request("POST", "$path/workouts", 201, owner,
             """{"performedAt":"2026-11-21T09:00:00Z","exercises":[$exercise]}""")
         val workoutPath = "/workouts/" + workout["session"]["id"]
@@ -437,35 +539,43 @@ class TrainingApiTest : AbstractDbTest() {
         val exercisePath = "/exercises/" + original["exercise"]["id"]
         val setPath = "/sets/" + original["sets"].first()["id"]
 
-        request("DELETE", setPath, 403, other)
-        request("POST", "$exercisePath/sets", 403, other, """{"reps":2}""")
+        // Another trainer's record and a missing one give the same answer.
+        request("DELETE", setPath, 404, other)
+        request("POST", "$exercisePath/sets", 404, other, """{"reps":2}""")
         request("DELETE", setPath, 204, owner)
+        // The remaining set moved up, so the numbering stays 1, 2.
         val appended = request("POST", "$exercisePath/sets", 201, owner, """{"reps":5}""")
-        assertEquals(3, appended["setNumber"].asInt())
+        assertEquals(2, appended["setNumber"].asInt())
+        assertEquals(listOf(1, 2), request("GET", workoutPath, 200, owner)["exercises"].first()["sets"].map { it["setNumber"].asInt() })
         val meta = """{"performedAt":"2026-11-22T09:00:00Z","durationMin":55,"note":"Новая дата"}"""
-        request("PUT", workoutPath, 403, other, meta)
+        request("PUT", workoutPath, 404, other, meta)
+        request("PUT", workoutPath, 400, owner, meta.replace("2026-11-22", "0001-01-01"))
         assertEquals(55, request("PUT", workoutPath, 200, owner, meta)["session"]["durationMin"].asInt())
-        request("POST", "$workoutPath/exercises", 403, other, exercise)
+        request("POST", "$workoutPath/exercises", 404, other, exercise)
         request("POST", "$workoutPath/exercises", 201, owner, exercise)
-        request("DELETE", exercisePath, 403, other)
+        request("DELETE", exercisePath, 404, other)
         request("DELETE", exercisePath, 204, owner)
         assertEquals(2, request("POST", "$workoutPath/exercises", 201, owner, exercise)["orderIndex"].asInt())
-        request("DELETE", workoutPath, 403, other)
+        request("DELETE", workoutPath, 404, other)
         request("DELETE", workoutPath, 204, owner)
 
         val input = """{"measuredOn":"2026-11-21","waistCm":80}"""
         val m = request("POST", "$path/measurements", 201, owner, input)
         val measurement = "/measurements/" + m["id"]
-        request("PUT", measurement, 403, other, input)
-        request("PUT", measurement, 200, owner, """{"measuredOn":"2026-11-21","calfCm":35}""")
+        request("PUT", measurement, 404, other, input)
+        assertEquals(1, request("PUT", measurement, 200, owner, """{"measuredOn":"2026-11-21","calfCm":35}""")["version"].asInt())
+        // The bot edits the version it showed; a record changed since then is not overwritten.
+        request("PUT", "$measurement?expectedVersion=0", 409, owner, input)
+        request("PUT", "$measurement?expectedVersion=1", 200, owner, """{"measuredOn":"2026-11-21","calfCm":35}""")
+        request("POST", "$path/measurements", 400, owner, """{"measuredOn":"0001-01-01","waistCm":80}""")
         assertEquals(35, request("GET", "$path/measurements/current", 200, owner)["calfCm"]["value"].asInt())
-        request("DELETE", measurement, 403, other)
+        request("DELETE", measurement, 404, other)
         request("DELETE", measurement, 204, owner)
-        request("POST", "$path/archive", 403, other)
+        request("POST", "$path/archive", 404, other)
         assertEquals("ARCHIVED", request("POST", "$path/archive", 200, owner)["status"].asText())
         assertTrue(request("GET", "/clients", 200, owner).isEmpty)
         assertEquals("ACTIVE", request("POST", "$path/restore", 200, owner)["status"].asText())
-        request("DELETE", path, 403, other)
+        request("DELETE", path, 404, other)
         request("DELETE", path, 204, owner)
     }
 
@@ -481,23 +591,9 @@ class TrainingApiTest : AbstractDbTest() {
         assertEquals(401, status("/auth/deliveries/next", null, true))
         assertEquals(401, status("/auth/deliveries/next", trainingKey, true))
         assertEquals(204, status("/auth/deliveries/next", authKey, true))
-        assertEquals(401, status("/training/linked/123", authKey))
-        assertEquals(204, status("/training/linked/123", trainingKey))
+        assertEquals(401, status("/training/updates/123/1/begin", authKey, true))
+        assertEquals(200, status("/training/updates/123/1/begin", trainingKey, true))
         assertEquals(401, status("/training/chats/123/clients", trainingKey))
-    }
-
-    @Test
-    fun `existing Telegram trainer can read their clients and rotate their API token`() {
-        val trainer = runBlocking { newTrainer(8345) }
-        val client = runBlocking { newClient(trainer) }
-        val first = runBlocking { Services.trainer.issueApiToken(trainer.id) }
-        request("GET", "/clients", 403, first)
-        linkTelegram(first, 8345)
-        assertEquals("tg:8345", request("GET", "/trainers/me", 200, first)["username"].asText())
-        assertEquals(client.id, request("GET", "/clients", 200, first).single()["id"].asLong())
-        val replacement = runBlocking { Services.trainer.issueApiToken(trainer.id) }
-        request("GET", "/trainers/me", 401, first)
-        assertEquals(trainer.id, request("GET", "/trainers/me", 200, replacement)["id"].asLong())
     }
 
     @Test
@@ -510,7 +606,7 @@ class TrainingApiTest : AbstractDbTest() {
         runBlocking { Services.catalog.saveExercise(null, com.tc.gymtrainer.service.ExerciseEdit("Тестовое упражнение", group)) }
         fun workout(sets: String) = """
             {"performedAt":"2026-11-20T12:00:00+04:00","exercises":[
-              {"muscleGroupId":$group,"exerciseName":"Тестовое упражнение","sets":$sets}
+              {"exerciseName":"Тестовое упражнение","sets":$sets}
             ]}
         """.trimIndent()
         val created = request("POST", path, 201, token, workout("""[{"weightKg":12.5,"reps":8},{"durationSec":45}]"""))
@@ -538,9 +634,9 @@ class TrainingApiTest : AbstractDbTest() {
         request("GET", "/clients", 401)
         val other = register()
         assertTrue(request("GET", "/clients", 200, other).isEmpty)
-        request("GET", "/workouts/$id", 403, other)
-        request("POST", path, 403, other, workout("""[{"reps":8}]"""))
-        request("PUT", "/sets/$setId", 403, other, """{"reps":10}""")
+        request("GET", "/workouts/$id", 404, other)
+        request("POST", path, 404, other, workout("""[{"reps":8}]"""))
+        request("PUT", "/sets/$setId", 404, other, """{"reps":10}""")
     }
 
     @Test
@@ -594,7 +690,7 @@ class TrainingApiTest : AbstractDbTest() {
         request("POST", path, 400, token, """{"measuredOn":"2026-11-04","leftCalfCm":-1}""")
         request("POST", path, 400, token, """{"measuredOn":"2026-11-04","rightThighCm":55.55}""")
         val other = register()
-        request("GET", path, 403, other)
-        request("POST", path, 403, other, """{"measuredOn":"2026-11-02","weightKg":60}""")
+        request("GET", path, 404, other)
+        request("POST", path, 404, other, """{"measuredOn":"2026-11-02","weightKg":60}""")
     }
 }

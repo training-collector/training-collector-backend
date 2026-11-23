@@ -8,7 +8,6 @@ import com.tc.gymtrainer.domain.Sex
 import com.tc.gymtrainer.domain.WorkoutDetail
 import com.tc.gymtrainer.service.BotRole
 import com.tc.gymtrainer.service.CatalogEdit
-import dev.inmo.tgbotapi.extensions.behaviour_builder.DefaultBehaviourContext
 import dev.inmo.tgbotapi.requests.send.SendTextMessage
 import dev.inmo.tgbotapi.types.buttons.ReplyKeyboardMarkup
 import dev.inmo.tgbotapi.types.buttons.InlineKeyboardMarkup
@@ -32,21 +31,19 @@ class TrainingDialogsTest {
     @Test
     fun `webhooks preserve every dialog across cold starts and ignore redelivery`() = runDialogs(true)
 
-    private fun runDialogs(webhook: Boolean) {
+    /** [coldStarts]: every update meets a new handler and is delivered twice, as on a hosted webhook. */
+    private fun runDialogs(coldStarts: Boolean) {
         PostgreSQLContainer("postgres:16-alpine").use { pg ->
             pg.start()
             val config = AppConfig(DatabaseConfig(pg.jdbcUrl, pg.username, pg.password, 4), ServerConfig("127.0.0.1", 0))
             withTestPlatform(config) { services, training, _ ->
-                var scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
                 val telegram = TestTelegram(100, "trainer_test_bot")
-                var context = DefaultBehaviourContext(telegram, scope)
                 val json = Json { ignoreUnknownKeys = true }
                 try {
                     runBlocking {
-                        suspend fun installBot() {
-                            if (webhook) BotRole.TRAINING.record("trainer_test_bot") else GymTrainerBot(training).install(context)
-                        }
-                        installBot()
+                        // The long-lived handler of a locally polling bot. A restart replaces it.
+                        var handler = UpdateHandler(training, telegram, "trainer_test_bot")
+                        BotRole.TRAINING.record("trainer_test_bot")
                         BotRole.LOGIN_CODES.record("auth_test_bot")
                         val id = services.trainers.registerForWeb("profile_test", "Test", "Coach").trainer.id
                         services.telegramLinks.confirmSignup(services.telegramLinks.createSignupLink(id).url.substringAfter("?start="), 123)
@@ -60,9 +57,9 @@ class TrainingDialogsTest {
                         suspend fun update(body: String) {
                             val raw = """{"update_id":${++updateId},$body}"""
                             val event = json.decodeFromString(UpdateDeserializationStrategy, raw)
-                            if (webhook) {
-                                repeat(2) { TrainingWebhook(training, telegram, "trainer_test_bot").process(event) }
-                            } else context.asUpdateReceiver(event)
+                            if (coldStarts) {
+                                repeat(2) { UpdateHandler(training, telegram, "trainer_test_bot").process(event) }
+                            } else handler.process(event)
                         }
                         suspend fun text(value: String) = update(
                             """"message":{"message_id":${++updateId},"date":1700000000,"from":$user,"chat":$chat,"text":${JsonPrimitive(value)}}"""
@@ -95,7 +92,7 @@ class TrainingDialogsTest {
                         }
                         suspend fun openClient(clientId: Long, next: String): Int {
                             val listing = inline(say("Подопечные", "Ваши подопечные"))
-                            assertEquals("➕ Добавить подопечного", listing.first().text)
+                            assertEquals("➕ Добавить подопечного", listing.last().text)
                             assertClientCard(click(listing.single { it.callbackData == "cl:view:$clientId" }.callbackData, next))
                             return telegram.messageId.get()
                         }
@@ -173,9 +170,8 @@ class TrainingDialogsTest {
                             assertEquals(Sex.FEMALE, edited.sex)
                             assertEquals("coach_test", edited.telegramUsername)
                             assertEquals(28, edited.age)
-                            assertNull(edited.phone)
-                            // The legacy web editor sends a fullName and must preserve the structured profile.
-                            services.clients.update(id, ivan.id, edited.fullName, edited.phone, edited.goal, "запись с сайта")
+                            // The web editor does not show the details set in the bot and must preserve them.
+                            services.clients.update(id, ivan.id) { it.copy(notes = "запись с сайта") }
                             assertEquals(edited.profile().copy(notes = "запись с сайта"), services.clients.getOwned(id,ivan.id).profile())
                             return ivan
                         }
@@ -232,7 +228,7 @@ class TrainingDialogsTest {
                         say("Убрать последний подход", "Подходов в упражнении: 2")
                         assertTrue(services.workouts.history(id, client.id).isEmpty())
                         assertEquals(listOf(10, 8), services.workouts.getDetail(id, firstSession).exercises.single().sets.map { it.reps })
-                        assertEquals(chest.id, press.muscleGroupId)
+                        assertEquals(press.id, services.workouts.getDetail(id, firstSession).exercises.single().exercise.exerciseCatalogId)
                         val plank = services.catalog.saveExercise(null, ExerciseEdit("Планка", core.id))
                         val hold = services.catalog.saveExercise(null, ExerciseEdit("Удержание гири", core.id, "Удерживайте гирю у груди."))
                         val categoryMenu = inline(say("Упражнения", "Выберите группу"))
@@ -247,11 +243,8 @@ class TrainingDialogsTest {
                         val holdCard = click(savedExercises.single { it.text == hold.name }.callbackData, hold.name)
                         assertEquals("Название: Удержание гири\n\nОписание: Удерживайте гирю у груди.", holdCard.text)
 
-                        // Lose the entire Telegram dialog and reinstall the bot against the same PostgreSQL.
-                        scope.coroutineContext.job.cancelAndJoin()
-                        scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
-                        context = DefaultBehaviourContext(telegram, scope)
-                        installBot()
+                        // Restart the bot against the same PostgreSQL: the dialog lives on the platform, not in the process.
+                        handler = UpdateHandler(training, telegram, "trainer_test_bot")
                         openClient(client.id, "Идёт тренировка")
                         val currentMenu = click("w:hist:${client.id}", "Тренировки")
                         assertActiveWorkoutMenu(currentMenu, client.id, firstSession)
@@ -277,7 +270,7 @@ class TrainingDialogsTest {
                         suspend fun finishWithoutDuration(): WorkoutDetail {
                             val returnMenu = pressAnna("w:hist", "Тренировки")
                             val finishPrompt = pressButton(returnMenu, "Завершить тренировку", "Длительность тренировки")
-                            assertEquals(listOf("Указать время", "Завершить сразу", "↩️ К тренировкам"), inline(finishPrompt).map { it.text })
+                            assertEquals(listOf("Указать продолжительность", "Завершить сразу", "↩️ К тренировкам"), inline(finishPrompt).map { it.text })
                             val stillActive = pressButton(finishPrompt, "↩️ К тренировкам", "Тренировки")
                             assertActiveWorkoutMenu(stillActive, client.id, firstSession)
                             assertTrue(services.workouts.history(id, client.id).isEmpty())
@@ -285,7 +278,7 @@ class TrainingDialogsTest {
                             pressButton(reopenedPrompt, "Завершить сразу", "Тренировка завершена")
                             assertClientCard(expect("Анна Мария"))
                             assertNull(services.workouts.activeForClient(id, client.id))
-                            val workout = services.workouts.lastWorkout(id, client.id)!!
+                            val workout = services.workouts.getDetail(id, services.workouts.history(id, client.id).first().id)
                             assertNull(workout.session.durationMin)
                             assertEquals(firstSession, workout.session.id)
                             assertEquals(listOf(10,8), workout.exercises.single().sets.map { it.reps })
@@ -308,13 +301,6 @@ class TrainingDialogsTest {
                         expect("уже завершена")
                         assertEquals(nextId, services.workouts.activeForClient(id, client.id)!!.id)
 
-                        // A session left at the old template prompt also resumes directly at exercise selection.
-                        DriverManager.getConnection(pg.jdbcUrl, pg.username, pg.password).use { connection ->
-                            connection.prepareStatement("UPDATE workout_session SET stage = 'CHOOSE_TEMPLATE' WHERE id = ?").use {
-                                it.setLong(1, nextId)
-                                assertEquals(1, it.executeUpdate())
-                            }
-                        }
                         suspend fun finishTimedExercisesWithPreset() {
                             callback("w:resume:$nextId")
                             expect("Выберите группу мышц")
@@ -330,17 +316,16 @@ class TrainingDialogsTest {
                             say("16 30с", "16 кг × 30 с")
                             val lastReview = say("Готово", "Упражнений в тренировке: 2")
                             val finishFromReview = pressButton(lastReview, "Завершить тренировку", "Длительность тренировки")
-                            val presets = pressButton(finishFromReview, "Указать время", "Сколько минут?")
+                            val presets = pressButton(finishFromReview, "Указать продолжительность", "Сколько минут?")
                             assertEquals(listOf("30 мин", "45 мин", "50 мин", "60 мин", "90 мин", "Свой вариант", "Завершить сразу", "↩️ К завершению"), inline(presets).map { it.text })
                             pressButton(presets, "50 мин", "Тренировка завершена")
                             assertClientCard(expect("🕒 Длительность: 50 мин"))
                             pressButton(presets, "30 мин", "уже завершена")
-                            assertEquals(50, services.workouts.getSession(id, nextId).durationMin)
-                            val timed = services.workouts.lastWorkout(id, client.id)!!.exercises
+                            assertEquals(50, services.workouts.getDetail(id, nextId).session.durationMin)
+                            val timed = services.workouts.getDetail(id, nextId).exercises
                             assertEquals(listOf(plank.id, hold.id), timed.map { it.exercise.exerciseCatalogId })
                             assertEquals(listOf(45, 30), timed.map { it.sets.single().durationSec })
                             assertEquals(listOf(null, "16"), timed.map { Format.number(it.sets.single().weightKg) })
-                            assertEquals(listOf(core.id, core.id), timed.map { it.exercise.muscleGroupId })
                         }
                         finishTimedExercisesWithPreset()
 
@@ -383,11 +368,11 @@ class TrainingDialogsTest {
                             val session = services.workouts.startOrResume(id, ivan.id)
                             val menu = click("w:hist:${ivan.id}", "Тренировки")
                             val finish = pressButton(menu, "Завершить тренировку", "Длительность тренировки")
-                            val presets = pressButton(finish, "Указать время", "Сколько минут?")
+                            val presets = pressButton(finish, "Указать продолжительность", "Сколько минут?")
                             val custom = pressButton(presets, "Свой вариант", "в минутах целым числом")
                             val back = pressButton(custom, "↩️ К выбору длительности", "Сколько минут?")
                             val confirm = pressButton(back, "↩️ К завершению", "Длительность тренировки")
-                            val choose = pressButton(confirm, "Указать время", "Сколько минут?")
+                            val choose = pressButton(confirm, "Указать продолжительность", "Сколько минут?")
                             pressButton(choose, "Свой вариант", "Например, 75")
                             say("0", "положительное целое число минут")
                             say("1:15", "положительное целое число минут")
@@ -418,7 +403,7 @@ class TrainingDialogsTest {
                             say("0", "положительное целое число")
                             say("45", "Тренировка обновлена")
                             expect("Что изменить?")
-                            suspend fun savedSession() = services.workouts.getSession(id, session.id)
+                            suspend fun savedSession() = services.workouts.getDetail(id, session.id).session
                             assertEquals("Заметка с сайта", savedSession().note)
                             assertEquals(session.performedAt, savedSession().performedAt)
 
@@ -448,10 +433,31 @@ class TrainingDialogsTest {
                         }
                         editWorkoutFromHistory()
 
+                        // The bot keeps the trainer's calendar: the same workout is a day later in a zone far to the east.
+                        suspend fun datesFollowTheTrainersTimeZone() {
+                            val evening = java.time.OffsetDateTime.parse("2026-04-06T20:00:00Z")
+                            services.workouts.updateSession(id, workout.session.id, evening, null, null)
+                            services.trainers.updateTimeZone(id, "Pacific/Kiritimati")
+                            val history = inline(pressAnna("w:hist", "Тренировки")).single { it.text == "Прошедшие тренировки" }
+                            val listed = inline(click(history.callbackData, "Прошедшие тренировки"))
+                            assertTrue(listed.any { it.text == "🗓 07.04.2026" }, listed.map { it.text }.toString())
+                            click("w:view:${workout.session.id}", "Тренировка 07.04.2026")
+                            expect("Что изменить?")
+                            click("w:date", "Дата тренировки · 07.04.2026")
+                            say("10.04.2026", "Тренировка обновлена")
+                            expect("Что изменить?")
+                            // 10 April, 10:00 on Kiritimati is still the evening of 9 April in UTC.
+                            assertEquals(java.time.OffsetDateTime.parse("2026-04-09T20:00:00Z").toInstant(),
+                                services.workouts.getDetail(id, workout.session.id).session.performedAt.toInstant())
+                            click("w:done", "Тренировка 10.04.2026")
+                            services.trainers.updateTimeZone(id, "UTC")
+                        }
+                        datesFollowTheTrainersTimeZone()
+
                         suspend fun recordAndEditMeasurements() {
                             val menuMessageId = annaCard
                             val emptyHistory = pressAnna("m:hist", "замеров пока нет")
-                            assertEquals("Добавить новый замер", inline(emptyHistory).first().text)
+                            assertEquals("➕ Добавить новый замер", inline(emptyHistory).first().text)
                             assertEquals("↩️ К подопечному", inline(emptyHistory).last().text)
                             val draftFields = click(inline(emptyHistory).first().callbackData, "Выберите показатель")
                             assertEquals(listOf("Сохранить", "Отмена"), buttons(draftFields).take(2))
@@ -503,7 +509,6 @@ class TrainingDialogsTest {
                         click(secondPage.single { it.text == "↩️ Назад" }.callbackData, "1 из 2")
                     }
                 } finally {
-                    runBlocking { scope.coroutineContext.job.cancelAndJoin() }
                     telegram.close()
                 }
             }

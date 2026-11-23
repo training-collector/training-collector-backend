@@ -6,9 +6,9 @@ import com.tc.gymtrainer.authbot.AuthBot
 import com.tc.gymtrainer.authbot.platform.AuthPlatform
 import com.tc.gymtrainer.config.*
 import com.tc.gymtrainer.db.DatabaseFactory
-import com.tc.gymtrainer.service.AuthDispatch
 import com.tc.gymtrainer.service.BotRole
-import com.tc.gymtrainer.service.BotUnavailableException
+import dev.inmo.tgbotapi.types.buttons.InlineKeyboardButtons.CallbackDataInlineKeyboardButton
+import dev.inmo.tgbotapi.types.buttons.InlineKeyboardMarkup
 import dev.inmo.tgbotapi.types.update.abstracts.UpdateDeserializationStrategy
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.netty.Netty
@@ -21,19 +21,14 @@ import java.net.URI
 import java.net.http.*
 import java.sql.DriverManager
 
-class HostedLoginTest {
+class BotRestartTest {
     @Test
-    fun `approval wakes the auth bot without another update and a delayed resend survives restart`() {
+    fun `a restarted bot continues the sign-in and repeated deliveries are handled once`() {
         PostgreSQLContainer("postgres:16-alpine").use { pg ->
             pg.start()
             val db = DatabaseConfig(pg.jdbcUrl, pg.username, pg.password, 3)
             DatabaseFactory.init(db).use {
-                var events = 0
-                var available = false
-                val services = TrainingServices(AuthDispatch {
-                    if (!available) throw BotUnavailableException()
-                    events++
-                })
+                val services = TrainingServices()
                 val keys = BotAccess("test-auth", "test-training")
                 val server = embeddedServer(Netty, host = "127.0.0.1", port = 0) {
                     trainingApi(services, keys, AdminAccess("test", "pw"))
@@ -50,50 +45,64 @@ class HostedLoginTest {
                         }
                         val platform = AuthPlatform(base, keys.authKey)
                         val telegram = TestTelegram(200, "test_auth_bot")
-                        fun bot() = AuthBot(platform, "test-token")
+                        // Every call uses a new bot, as after a restart: it keeps no state of its own.
+                        fun bot() = AuthBot(platform)
+                        suspend fun deliverAll() { while (bot().deliverNextNotification(telegram) or bot().deliverNext(telegram)) Unit }
                         BotRole.LOGIN_CODES.record("test_auth_bot")
                         val trainer = services.trainers.registerForWeb("pilot", "Coach", "Test").trainer
                         val link = services.telegramLinks.createSignupLink(trainer.id)
                         val event = Json { ignoreUnknownKeys = true }.decodeFromString(UpdateDeserializationStrategy,
-                            """{"update_id":5,"message":{"message_id":8,"date":1700000001,"chat":{"id":123,"type":"private","first_name":"A"},"from":{"id":123,"is_bot":false,"first_name":"A"},"text":"/start ${link.challenge}"}}""")
-                        repeat(2) { bot().webhook(telegram, event, "test_auth_bot") }
+                            """{"update_id":5,"message":{"message_id":8,"date":1700000001,"chat":{"id":123,"type":"private","first_name":"A"},"from":{"id":123,"is_bot":false,"first_name":"A"},"text":"/start ${link.url.substringAfter("?start=")}"}}""")
+                        repeat(2) { bot().handle(telegram, event, "test_auth_bot") }
                         assertTrue(telegram.sent.tryReceive().getOrThrow().text.contains("pilot"))
                         assertTrue(telegram.sent.tryReceive().isFailure)
                         val login = post("/admin/v1/login", """{"login":"test","password":"pw"}""")
                         val admin = Json.parseToJsonElement(login.body()).jsonObject.getValue("token").jsonPrimitive.content
                         val approval = "/admin/v1/trainers/${trainer.id}/approve"
-                        assertEquals(503, post(approval, "{}", admin).statusCode())
-                        assertNull(services.admin.trainers().single().approvedAt)
-                        available = true
                         assertEquals(204, post(approval, "{}", admin).statusCode())
-                        assertEquals(1, events)
-                        assertNull(bot().drain(telegram))
+                        assertNotNull(services.admin.trainers().single().approvedAt)
+                        // A repeated approval sends nothing new.
+                        assertEquals(204, post(approval, "{}", admin).statusCode())
+                        deliverAll()
                         assertTrue(telegram.sent.tryReceive().getOrThrow().text.contains("активирован"))
-                        assertEquals("Код для авторизации", telegram.sent.tryReceive().getOrThrow().text)
-                        val first = telegram.sent.tryReceive().getOrThrow().text
-                        assertTrue(first.matches(Regex("[0-9]{6}")))
-                        val resend = post("/api/v1/auth/login", """{"username":"pilot","resend":true}""")
-                        assertEquals(200, resend.statusCode())
-                        assertEquals(2, events)
-                        assertTrue(requireNotNull(bot().drain(telegram)) in 1..60)
                         assertTrue(telegram.sent.tryReceive().isFailure)
-                        DriverManager.getConnection(db.jdbcUrl, db.user, db.password).use { conn ->
-                            conn.createStatement().use { it.executeUpdate("UPDATE login_challenge SET next_delivery_at=now()") }
-                        }
-                        assertNull(bot().drain(telegram))
-                        assertEquals("Код для авторизации", telegram.sent.tryReceive().getOrThrow().text)
-                        val code = telegram.sent.tryReceive().getOrThrow().text
-                        assertEquals(200, post("/api/v1/auth/login/verify", """{"username":"pilot","code":"$code"}""").statusCode())
+                        // Two browsers ask to sign in; each gets its own request.
+                        val json = Json { ignoreUnknownKeys = true }
+                        fun signIn() = json.parseToJsonElement(post("/api/v1/auth/login", """{"username":"pilot"}""").body()).jsonObject
+                        val start = signIn()
+                        val again = signIn()
+                        deliverAll()
+                        val messages = List(2) { telegram.sent.tryReceive().getOrThrow() }
+                        assertTrue(telegram.sent.tryReceive().isFailure)
+                        // Each message repeats the number of its own request.
+                        val numbers = listOf(start, again).map { it.getValue("number").jsonPrimitive.content }
+                        assertTrue(messages.zip(numbers).all { (sent, shown) -> sent.text.contains("число $shown") })
+                        val message = messages.first()
+                        val allow = (message.replyMarkup as InlineKeyboardMarkup).keyboard.flatten().map { it as CallbackDataInlineKeyboardButton }
+                            .single { it.text == "Разрешить вход" }.callbackData
+                        fun status(of: kotlinx.serialization.json.JsonObject) = json.parseToJsonElement(
+                            post("/api/v1/auth/login/status", """{"secret":"${of.getValue("secret").jsonPrimitive.content}"}""").body()).jsonObject
+                        val press = json.decodeFromString(UpdateDeserializationStrategy, """{"update_id":6,"callback_query":{"id":"cb6",
+                            "from":{"id":123,"is_bot":false,"first_name":"A"},"chat_instance":"c","data":"$allow",
+                            "message":{"message_id":9,"date":1700000002,"chat":{"id":123,"type":"private","first_name":"A"},
+                            "from":{"id":200,"is_bot":true,"first_name":"Bot"},"text":"Вход в кабинет pilot"}}}""")
+                        // Telegram may deliver the press twice; it is handled once.
+                        repeat(2) { bot().handle(telegram, press, "test_auth_bot") }
+                        assertTrue(telegram.edited.tryReceive().getOrThrow().text.contains("Вход разрешён"))
+                        assertTrue(telegram.edited.tryReceive().isFailure)
+                        val approved = listOf(start, again).map(::status)
+                        val session = approved.single { it.getValue("status").jsonPrimitive.content == "APPROVED" }.getValue("token").jsonPrimitive.content
+                        assertTrue(session.startsWith("session."))
 
                         // Lose a platform response after commit, then retry the same webhook write.
                         BotRole.TRAINING.record("test_training_bot")
                         val trainingLink = services.telegramLinks.createTrainingLink(trainer.id)
                         services.telegramLinks.connectTrainingBot(trainingLink.url.substringAfter("?start="), 123)
                         val receipt = java.util.UUID.randomUUID().toString()
-                        val path = "/internal/v1/training/chats/123/clients/profile"
-                        val body = """{"profile":{"firstName":"Аня","lastName":"Тест"}}"""
+                        val path = "/internal/v1/training/chats/123/clients"
+                        val body = """{"firstName":"Аня","lastName":"Тест"}"""
                         val created = post(path, body, keys.trainingKey, receipt)
-                        assertEquals(200, created.statusCode())
+                        assertEquals(201, created.statusCode())
                         val replayed = post(path, body, keys.trainingKey, receipt)
                         assertEquals(created.body(), replayed.body())
                         assertEquals(1, services.clients.list(trainer.id).size)

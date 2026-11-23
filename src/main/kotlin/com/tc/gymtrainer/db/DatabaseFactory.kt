@@ -11,15 +11,16 @@ import javax.sql.DataSource
 
 /**
  * Инициализация подключения к БД: пул Hikari → миграции Flyway → Exposed.
- * Схему всегда накатывает Flyway (единственный источник правды по DDL).
+ * Схему всегда накатывает Flyway (единственный источник правды по DDL): при старте
+ * сервиса или отдельным шагом развёртывания, если migrateOnStart выключен.
  */
 object DatabaseFactory {
     private val log = LoggerFactory.getLogger(DatabaseFactory::class.java)
 
     fun init(config: DatabaseConfig): AutoCloseable {
-        val dataSource = hikari(config)
+        val dataSource = hikari(config, connectNow = config.migrateOnStart)
         val database = try {
-            migrate(dataSource)
+            if (config.migrateOnStart) migrate(dataSource)
             Database.connect(dataSource)
         } catch (e: Exception) {
             dataSource.close()
@@ -31,7 +32,10 @@ object DatabaseFactory {
         }
     }
 
-    private fun hikari(config: DatabaseConfig): HikariDataSource {
+    /** Applies pending migrations and releases the connection. */
+    fun migrate(config: DatabaseConfig) = hikari(config, connectNow = true).use(::migrate)
+
+    private fun hikari(config: DatabaseConfig, connectNow: Boolean): HikariDataSource {
         val hikari = HikariConfig().apply {
             jdbcUrl = config.jdbcUrl
             username = config.user
@@ -41,8 +45,10 @@ object DatabaseFactory {
             minimumIdle = 0
             idleTimeout = 60_000
             keepaliveTime = 0
-            // IDEA starts the PostgreSQL container alongside the API and the two bots.
-            initializationFailTimeout = 120_000
+            // IDEA starts the PostgreSQL container alongside the API and the two bots, so the first
+            // connection may have to wait. Without migrations the pool connects on the first query:
+            // a cold start then does not wake a sleeping database.
+            initializationFailTimeout = if (connectNow) 120_000 else -1
             isAutoCommit = false
             transactionIsolation = "TRANSACTION_READ_COMMITTED"
             poolName = "gym-trainer-pool"

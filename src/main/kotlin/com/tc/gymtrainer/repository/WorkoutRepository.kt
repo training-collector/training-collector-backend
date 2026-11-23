@@ -5,20 +5,27 @@ import com.tc.gymtrainer.db.WorkoutExercises
 import com.tc.gymtrainer.db.WorkoutSessions
 import com.tc.gymtrainer.domain.ExerciseSet
 import com.tc.gymtrainer.domain.ExerciseWithSets
+import com.tc.gymtrainer.domain.SetDraft
 import com.tc.gymtrainer.domain.WorkoutDetail
 import com.tc.gymtrainer.domain.WorkoutExercise
 import com.tc.gymtrainer.domain.WorkoutSession
 import com.tc.gymtrainer.domain.WorkoutStage
 import org.jetbrains.exposed.sql.Op
 import org.jetbrains.exposed.sql.SortOrder
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.greater
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.minus
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.neq
 import org.jetbrains.exposed.sql.and
+import org.jetbrains.exposed.sql.batchInsert
 import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.innerJoin
 import org.jetbrains.exposed.sql.insertAndGetId
 import org.jetbrains.exposed.sql.lowerCase
+import org.jetbrains.exposed.sql.max
+import org.jetbrains.exposed.sql.select
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.update
-import java.math.BigDecimal
 import java.time.OffsetDateTime
 
 /** Доступ к тренировкам (сессии, упражнения, подходы). Вызывать в транзакции. */
@@ -48,56 +55,38 @@ class WorkoutRepository {
         return WorkoutSession(id, clientId, trainerId, performedAt, durationMin, note, now, now, stage)
     }
 
-    fun insertExercise(
-        sessionId: Long,
-        muscleGroupId: Long?,
-        exerciseCatalogId: Long?,
-        exerciseName: String,
-        orderIndex: Int,
-        note: String?,
-    ): WorkoutExercise {
+    fun insertExercise(sessionId: Long, exerciseCatalogId: Long?, exerciseName: String, orderIndex: Int, note: String?): WorkoutExercise {
         val id = WorkoutExercises.insertAndGetId {
             it[WorkoutExercises.sessionId] = sessionId
-            it[WorkoutExercises.muscleGroupId] = muscleGroupId
             it[WorkoutExercises.exerciseCatalogId] = exerciseCatalogId
             it[WorkoutExercises.exerciseName] = exerciseName
             it[WorkoutExercises.orderIndex] = orderIndex
             it[WorkoutExercises.note] = note
         }.value
-        return WorkoutExercise(id, sessionId, muscleGroupId, exerciseCatalogId, exerciseName, orderIndex, note)
+        return WorkoutExercise(id, sessionId, exerciseCatalogId, exerciseName, orderIndex, note)
     }
 
-    fun insertSet(
-        exerciseId: Long,
-        setNumber: Int,
-        weightKg: BigDecimal?,
-        reps: Int?,
-        restSec: Int?,
-        rpe: BigDecimal?,
-        durationSec: Int?,
-    ): ExerciseSet {
-        val id = ExerciseSets.insertAndGetId {
-            it[ExerciseSets.exerciseId] = exerciseId
-            it[ExerciseSets.setNumber] = setNumber
-            it[ExerciseSets.weightKg] = weightKg
-            it[ExerciseSets.durationSec] = durationSec
-            it[ExerciseSets.reps] = reps
-            it[ExerciseSets.restSec] = restSec
-            it[ExerciseSets.rpe] = rpe
-        }.value
-        return ExerciseSet(id, exerciseId, setNumber, weightKg, reps, restSec, rpe, durationSec)
+    /** Все подходы одним запросом. Номера продолжают [after]. */
+    fun insertSets(exerciseId: Long, after: Int, sets: List<SetDraft>) {
+        ExerciseSets.batchInsert(sets.withIndex(), shouldReturnGeneratedValues = false) { (index, set) ->
+            this[ExerciseSets.exerciseId] = exerciseId
+            this[ExerciseSets.setNumber] = after + index + 1
+            this[ExerciseSets.weightKg] = set.weightKg
+            this[ExerciseSets.durationSec] = set.durationSec
+            this[ExerciseSets.reps] = set.reps
+            this[ExerciseSets.restSec] = set.restSec
+            this[ExerciseSets.rpe] = set.rpe
+        }
     }
 
     // --- Чтение --------------------------------------------------------------
 
-    fun findSessionById(id: Long): WorkoutSession? =
+    /** Тренировка этого тренера. Чужая и несуществующая неразличимы. */
+    fun findOwnedSession(trainerId: Long, id: Long, lock: Boolean = false): WorkoutSession? =
         WorkoutSessions.selectAll()
-            .where { WorkoutSessions.id eq id }
-            .firstOrNull()
-            ?.toWorkoutSession()
-
-    fun lockSession(id: Long): WorkoutSession? =
-        WorkoutSessions.selectAll().where { WorkoutSessions.id eq id }.forUpdate().firstOrNull()?.toWorkoutSession()
+            .where { (WorkoutSessions.id eq id) and (WorkoutSessions.trainerId eq trainerId) }
+            .apply { if (lock) forUpdate() }
+            .firstOrNull()?.toWorkoutSession()
 
     fun lockExercise(id: Long): WorkoutExercise? =
         WorkoutExercises.selectAll().where { WorkoutExercises.id eq id }.forUpdate().firstOrNull()?.toWorkoutExercise()
@@ -108,16 +97,31 @@ class WorkoutRepository {
             .orderBy(WorkoutExercises.orderIndex to SortOrder.ASC)
             .map { it.toWorkoutExercise() }
 
-    fun listSets(exerciseId: Long): List<ExerciseSet> =
+    fun lastExercise(sessionId: Long): WorkoutExercise? =
+        WorkoutExercises.selectAll()
+            .where { WorkoutExercises.sessionId eq sessionId }
+            .orderBy(WorkoutExercises.orderIndex to SortOrder.DESC)
+            .limit(1).firstOrNull()?.toWorkoutExercise()
+
+    fun lastOrderIndex(sessionId: Long): Int? {
+        val last = WorkoutExercises.orderIndex.max()
+        return WorkoutExercises.select(last).where { WorkoutExercises.sessionId eq sessionId }.single()[last]
+    }
+
+    fun lastSetNumber(exerciseId: Long): Int {
+        val last = ExerciseSets.setNumber.max()
+        return ExerciseSets.select(last).where { ExerciseSets.exerciseId eq exerciseId }.single()[last] ?: 0
+    }
+
+    fun lastSet(exerciseId: Long): ExerciseSet? =
         ExerciseSets.selectAll()
             .where { ExerciseSets.exerciseId eq exerciseId }
-            .orderBy(ExerciseSets.setNumber to SortOrder.ASC)
-            .map { it.toExerciseSet() }
+            .orderBy(ExerciseSets.setNumber to SortOrder.DESC)
+            .limit(1).firstOrNull()?.toExerciseSet()
 
     /** Полная тренировка одним набором запросов (без N+1 по подходам). */
-    fun getDetail(sessionId: Long): WorkoutDetail? {
-        val session = findSessionById(sessionId) ?: return null
-        val exercises = listExercises(sessionId)
+    fun getDetail(session: WorkoutSession): WorkoutDetail {
+        val exercises = listExercises(session.id)
         if (exercises.isEmpty()) return WorkoutDetail(session, emptyList())
 
         val exerciseIds = exercises.map { it.id }
@@ -127,18 +131,8 @@ class WorkoutRepository {
             .map { it.toExerciseSet() }
             .groupBy { it.exerciseId }
 
-        val withSets = exercises.map { ex -> ExerciseWithSets(ex, setsByExercise[ex.id].orEmpty()) }
-        return WorkoutDetail(session, withSets)
+        return WorkoutDetail(session, exercises.map { ex -> ExerciseWithSets(ex, setsByExercise[ex.id].orEmpty()) })
     }
-
-    /** Последняя (по дате проведения) тренировка клиента — для переиспользования. */
-    fun lastSessionForClient(clientId: Long): WorkoutSession? =
-        WorkoutSessions.selectAll()
-            .where { (WorkoutSessions.clientId eq clientId) and (WorkoutSessions.stage eq WorkoutStage.COMPLETED) }
-            .orderBy(WorkoutSessions.performedAt to SortOrder.DESC, WorkoutSessions.id to SortOrder.DESC)
-            .limit(1)
-            .firstOrNull()
-            ?.toWorkoutSession()
 
     /**
      * История тренировок клиента с фильтрами по дате (полуинтервал [from, to)) и по
@@ -196,9 +190,6 @@ class WorkoutRepository {
         }
     }
 
-    fun deleteForClient(clientId: Long) =
-        WorkoutSessions.deleteWhere { with(it) { WorkoutSessions.clientId eq clientId } }
-
     fun updateSession(
         id: Long,
         performedAt: OffsetDateTime,
@@ -220,31 +211,24 @@ class WorkoutRepository {
 
     /** Удаление сессии каскадно удаляет упражнения и подходы (ON DELETE CASCADE). */
     fun deleteSession(id: Long): Boolean =
-        WorkoutSessions.deleteWhere { with(it) { WorkoutSessions.id eq id } } > 0
+        WorkoutSessions.deleteWhere { WorkoutSessions.id eq id } > 0
 
     fun deleteActiveSession(clientId: Long, sessionId: Long): Boolean =
-        WorkoutSessions.deleteWhere { with(it) {
+        WorkoutSessions.deleteWhere {
             (WorkoutSessions.id eq sessionId) and (WorkoutSessions.clientId eq clientId) and
                 (WorkoutSessions.stage neq WorkoutStage.COMPLETED)
-        } } > 0
+        } > 0
 
     fun deleteExercise(id: Long): Boolean =
-        WorkoutExercises.deleteWhere { with(it) { WorkoutExercises.id eq id } } > 0
+        WorkoutExercises.deleteWhere { WorkoutExercises.id eq id } > 0
 
-    fun updateSet(
-        id: Long,
-        weightKg: BigDecimal?,
-        reps: Int?,
-        restSec: Int?,
-        rpe: BigDecimal?,
-        durationSec: Int?,
-    ): Boolean =
+    fun updateSet(id: Long, set: SetDraft): Boolean =
         ExerciseSets.update({ ExerciseSets.id eq id }) {
-            it[ExerciseSets.weightKg] = weightKg
-            it[ExerciseSets.durationSec] = durationSec
-            it[ExerciseSets.reps] = reps
-            it[ExerciseSets.restSec] = restSec
-            it[ExerciseSets.rpe] = rpe
+            it[ExerciseSets.weightKg] = set.weightKg
+            it[ExerciseSets.durationSec] = set.durationSec
+            it[ExerciseSets.reps] = set.reps
+            it[ExerciseSets.restSec] = set.restSec
+            it[ExerciseSets.rpe] = set.rpe
         } > 0
 
     fun findSetById(id: Long): ExerciseSet? =
@@ -259,6 +243,12 @@ class WorkoutRepository {
             .firstOrNull()
             ?.toWorkoutExercise()
 
-    fun deleteSet(id: Long): Boolean =
-        ExerciseSets.deleteWhere { with(it) { ExerciseSets.id eq id } } > 0
+    /** Удаляет подход и сдвигает номера следующих, чтобы нумерация осталась сплошной. */
+    fun deleteSet(set: ExerciseSet): Boolean {
+        val deleted = ExerciseSets.deleteWhere { ExerciseSets.id eq set.id } > 0
+        ExerciseSets.update({ (ExerciseSets.exerciseId eq set.exerciseId) and (ExerciseSets.setNumber greater set.setNumber) }) {
+            it[setNumber] = setNumber - 1
+        }
+        return deleted
+    }
 }
