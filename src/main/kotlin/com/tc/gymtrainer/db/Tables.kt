@@ -85,6 +85,7 @@ object Clients : LongIdTable("client") {
 
 object MuscleGroups : LongIdTable("muscle_group") {
     val name = varchar("name", 128).uniqueIndex("uq_muscle_group_name")
+    val description = text("description").nullable()
 }
 
 object Goals : LongIdTable("goal_catalog") {
@@ -98,9 +99,14 @@ object AdminSessions : Table("admin_session") {
     override val primaryKey = PrimaryKey(tokenHash)
 }
 
+object AccessNotifications : LongIdTable("trainer_access_notification") {
+    val trainerId = reference("trainer_id", Trainers)
+    val active = bool("active")
+}
+
 object ExerciseCatalog : LongIdTable("exercise_catalog") {
     val hidden = bool("hidden").default(false)
-    val muscleGroupId = optReference("muscle_group_id", MuscleGroups)
+    val muscleGroupId = reference("muscle_group_id", MuscleGroups)
     val name = varchar("name", 255)
     val description = text("description").nullable()
 }

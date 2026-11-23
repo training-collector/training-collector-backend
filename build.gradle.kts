@@ -11,7 +11,14 @@ application { mainClass.set("com.tc.gymtrainer.AppKt") }
 
 tasks.test { useJUnitPlatform() }
 
+// Keep the running server's classes separate from compiler and test outputs.
+val localRunJar by tasks.registering(Jar::class) {
+    from(sourceSets.main.get().output)
+    destinationDirectory.set(layout.buildDirectory.dir("local-run"))
+}
+
 tasks.named<JavaExec>("run") {
+    classpath = files(localRunJar.flatMap { it.archiveFile }, configurations.runtimeClasspath)
     val localConfig = layout.projectDirectory.file(".env").asFile
     doFirst {
         if (localConfig.isFile) localConfig.readLines().filter { it.isNotBlank() && !it.startsWith("#") }.forEach { line ->

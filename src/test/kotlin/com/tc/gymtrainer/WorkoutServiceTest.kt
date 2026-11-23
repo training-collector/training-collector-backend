@@ -1,7 +1,7 @@
 package com.tc.gymtrainer
 
 import com.tc.gymtrainer.domain.ExerciseDraft
-import com.tc.gymtrainer.service.CatalogEdit
+import com.tc.gymtrainer.service.ExerciseEdit
 import com.tc.gymtrainer.domain.SetDraft
 import com.tc.gymtrainer.domain.WorkoutDraft
 import com.tc.gymtrainer.domain.WorkoutStage
@@ -12,6 +12,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertThrows
@@ -22,6 +23,51 @@ import java.time.OffsetDateTime
 import java.time.ZoneOffset
 
 class WorkoutServiceTest : AbstractDbTest() {
+
+    @Test
+    fun `cancelling only removes the matching active workout of the owned client`() = runBlocking {
+        val trainer = newTrainer(2050)
+        val otherTrainer = newTrainer(2051)
+        val client = newClient(trainer)
+        val otherClient = newClient(trainer, "Второй подопечный")
+        val workouts = Services.workout
+        val finished = workouts.startOrResume(trainer.id, client.id).id
+        workouts.finishWorkout(trainer.id, finished)
+        val active = workouts.startOrResume(trainer.id, client.id).id
+
+        assertThrows(AccessDeniedException::class.java) {
+            runBlocking { workouts.cancelActiveWorkout(otherTrainer.id, client.id, active) }
+        }
+        assertFalse(workouts.cancelActiveWorkout(trainer.id, otherClient.id, active))
+        assertFalse(workouts.cancelActiveWorkout(trainer.id, client.id, finished))
+        assertEquals(1, (1..2).map { async { workouts.cancelActiveWorkout(trainer.id, client.id, active) } }.awaitAll().count { it })
+        val next = workouts.startOrResume(trainer.id, client.id)
+        assertFalse(workouts.cancelActiveWorkout(trainer.id, client.id, active))
+        assertEquals(next.id, workouts.activeForClient(trainer.id, client.id)?.id)
+        assertEquals(listOf(finished), workouts.history(trainer.id, client.id).map { it.id })
+    }
+
+    @Test
+    fun `first finish saves positive minutes once even when retried concurrently`() = runBlocking {
+        val trainer = newTrainer(2052)
+        val client = newClient(trainer)
+        val workouts = Services.workout
+        val session = workouts.startOrResume(trainer.id, client.id)
+        for (invalid in listOf(-1, 0)) {
+            assertThrows(ValidationException::class.java) {
+                runBlocking { workouts.finishWorkout(trainer.id, session.id, invalid) }
+            }
+        }
+        val active = workouts.activeForClient(trainer.id, client.id)
+        assertEquals(session.id, active?.id)
+        assertNull(active?.durationMin)
+        val minutes = listOf(45, 50).map { duration ->
+            async { workouts.finishWorkout(trainer.id, session.id, duration).session.durationMin }
+        }.awaitAll().distinct().single()
+        assertTrue(minutes == 45 || minutes == 50)
+        assertEquals(minutes, workouts.finishWorkout(trainer.id, session.id).session.durationMin)
+        assertEquals(minutes, workouts.history(trainer.id, client.id).single().durationMin)
+    }
 
     @Test
     fun `starting concurrently opens one session per client and a late finish never closes the next one`() = runBlocking {
@@ -37,7 +83,7 @@ class WorkoutServiceTest : AbstractDbTest() {
         assertTrue(first != independent.id)
         assertThrows(AccessDeniedException::class.java) { runBlocking { workouts.finishWorkout(otherTrainer.id, first) } }
         assertThrows(AccessDeniedException::class.java) { runBlocking { workouts.startOrResume(otherTrainer.id, client.id) } }
-        val catalogItem = Services.catalog.saveExercise(null, CatalogEdit("Отжимания"))
+        val catalogItem = Services.catalog.saveExercise(null, ExerciseEdit("Отжимания", Services.catalog.listMuscleGroups().single().id))
         workouts.selectExercise(trainer.id, first, catalogItem.id)
         val ex = workouts.getDetail(trainer.id, first).exercises.single().exercise.id
         assertThrows(ValidationException::class.java) {
@@ -61,9 +107,12 @@ class WorkoutServiceTest : AbstractDbTest() {
 
     @org.junit.jupiter.api.BeforeEach
     fun publishExercises() {
-        runBlocking { listOf("Жим штанги лёжа", "Подтягивания", "Гакк-присед (новое)", "Приседания со штангой").forEach {
-            Services.catalog.saveExercise(null, CatalogEdit(it))
-        } }
+        runBlocking {
+            val group = Services.catalog.createMuscleGroup("Силовые")
+            listOf("Жим штанги лёжа", "Подтягивания", "Гакк-присед (новое)", "Приседания со штангой").forEach {
+                Services.catalog.saveExercise(null, ExerciseEdit(it, group.id))
+            }
+        }
     }
 
     private fun at(year: Int, month: Int, day: Int): OffsetDateTime =

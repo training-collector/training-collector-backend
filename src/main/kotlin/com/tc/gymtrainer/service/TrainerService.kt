@@ -14,12 +14,22 @@ class TrainerService(private val trainers: TrainerRepository) {
     suspend fun findByTelegramUserId(telegramUserId: Long): Trainer? =
         dbQuery { trainers.findByTelegramUserId(telegramUserId) }
 
-    suspend fun registerForWeb(username: String, firstName: String, lastName: String): TrainerRegistration {
+    private fun validatedNames(firstName: String, lastName: String): Pair<String, String> {
         val first = firstName.trim()
         val last = lastName.trim()
         if (first.isEmpty() || last.isEmpty() || first.length + last.length + 1 > 255) {
             throw ValidationException("Введите имя и фамилию общей длиной до 254 символов.")
         }
+        return first to last
+    }
+
+    suspend fun updateName(trainerId: Long, firstName: String, lastName: String): Trainer {
+        val (first, last) = validatedNames(firstName, lastName)
+        return dbQuery { trainers.updateName(trainerId, first, last) ?: throw AccessDeniedException("Доступ к профилю закрыт.") }
+    }
+
+    suspend fun registerForWeb(username: String, firstName: String, lastName: String): TrainerRegistration {
+        val (first, last) = validatedNames(firstName, lastName)
         val login = username.trim().lowercase()
         if (login.length !in 1..64 || !login.matches(Regex("""[\p{L}\p{M}\p{N}._-]+"""))) {
             throw ValidationException("Логин может содержать до 64 символов: буквы, цифры, точку, дефис и подчёркивание.")

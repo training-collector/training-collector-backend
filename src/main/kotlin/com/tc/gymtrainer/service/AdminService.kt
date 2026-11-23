@@ -7,8 +7,11 @@ import org.jetbrains.exposed.sql.*
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.inSubQuery
 import org.jetbrains.exposed.sql.SqlExpressionBuilder.lessEq
+import org.jetbrains.exposed.sql.statements.StatementType
 import java.security.MessageDigest
 import java.time.OffsetDateTime
+
+data class AccessNotification(val id: Long, val telegramId: Long, val username: String, val active: Boolean)
 
 class AdminService {
     suspend fun trainers() = dbQuery {
@@ -22,6 +25,7 @@ class AdminService {
         if (trainer.approvedAt == null) {
             val now = OffsetDateTime.now()
             Trainers.update({ Trainers.id eq id }) { it[approvedAt] = now }
+            notifyAccess(id, active = true)
             // The administrator may respond days after the signup link was issued.
             LoginChallenges.deleteWhere { trainerId eq id }
             LoginChallenges.insert {
@@ -47,6 +51,48 @@ class AdminService {
         WebSessions.deleteWhere { trainerId eq id }
         TelegramLinks.deleteWhere { trainerId eq id }
         LoginChallenges.deleteWhere { trainerId eq id }
+        notifyAccess(id, active = false)
+    }
+
+    suspend fun reactivate(id: Long) = dbQuery {
+        val trainer = locked(id)
+        if (trainer.approvedAt != null) return@dbQuery
+        if (trainer.deactivatedAt == null || trainer.telegramLinkedAt == null) throw ConflictException("Сначала одобрите заявку тренера.")
+        Trainers.update({ Trainers.id eq id }) {
+            it[approvedAt] = OffsetDateTime.now()
+            it[deactivatedAt] = null
+            it[codeChatStarted] = true
+        }
+        notifyAccess(id, active = true)
+    }
+
+    private fun notifyAccess(trainer: Long, active: Boolean) {
+        AccessNotifications.insert {
+            it[trainerId] = trainer
+            it[AccessNotifications.active] = active
+        }
+    }
+
+    suspend fun nextNotification(): AccessNotification? = dbQuery {
+        // Lease one event. Earlier unacknowledged changes for the same trainer must be delivered first.
+        exec("""
+            WITH candidate AS (
+                SELECT n.id FROM trainer_access_notification n
+                WHERE n.next_attempt_at <= now() AND NOT EXISTS (
+                    SELECT FROM trainer_access_notification prior WHERE prior.trainer_id = n.trainer_id AND prior.id < n.id
+                )
+                ORDER BY n.id LIMIT 1 FOR UPDATE OF n SKIP LOCKED
+            )
+            UPDATE trainer_access_notification n SET next_attempt_at = now() + interval '1 minute'
+            FROM candidate c, trainer t WHERE n.id = c.id AND t.id = n.trainer_id
+            RETURNING n.id, t.telegram_user_id, coalesce(t.username, t.full_name), n.active
+        """.trimIndent(), explicitStatementType = StatementType.SELECT) { rows ->
+            if (rows.next()) AccessNotification(rows.getLong(1), rows.getLong(2), rows.getString(3), rows.getBoolean(4)) else null
+        }
+    }
+
+    suspend fun acknowledgeNotification(id: Long) = dbQuery {
+        AccessNotifications.deleteWhere { AccessNotifications.id eq id }
     }
 
     suspend fun deleteTrainer(id: Long) = dbQuery {

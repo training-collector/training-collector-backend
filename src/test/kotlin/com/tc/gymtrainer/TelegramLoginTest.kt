@@ -122,6 +122,38 @@ class TelegramLoginTest : AbstractDbTest() {
     }
 
     @Test
+    fun `resends during delivery or cooldown schedule one fresh code without clearing failed attempts`() = runBlocking<Unit> {
+        BotRole.LOGIN_CODES.record("codes_bot")
+        val owner = services.trainers.registerForWeb("coach", "Имя", "Тест").trainer
+        val link = services.telegramLinks.createSignupLink(owner.id).url.substringAfter("?start=")
+        services.telegramLinks.confirmSignup(link, 123)
+        services.admin.approve(owner.id)
+        val codes = services.loginCodes
+        val first = codes.nextDelivery()!!.challenge
+        assertTrue(codes.prepareDelivery(first, "010101"))
+        repeat(4) { assertThrows(LoginException::class.java) { runBlocking { codes.verify(null, "000000", "coach") } } }
+        val requests = List(2) { async { codes.request("coach", resend = true) } }.awaitAll()
+        val next = requests.first().challenge
+        assertNotEquals(first, next)
+        assertEquals(next, requests.last().challenge)
+        assertTrue(requests.all { it.deliveryDelaySeconds in 1..60 })
+        codes.markHeadingSent(first)
+        codes.delivered(first) // Late acknowledgements must not swallow the replacement.
+        assertNull(codes.nextDelivery())
+        assertThrows(LoginException::class.java) { runBlocking { codes.verify(null, "010101", "coach") } }
+        dbQuery { LoginChallenges.update { it[nextDeliveryAt] = OffsetDateTime.now().minusSeconds(1) } }
+        assertEquals(CodeDelivery(next, 123), codes.nextDelivery())
+        assertTrue(codes.prepareDelivery(next, "020202"))
+        codes.delivered(next)
+        assertThrows(LoginException::class.java) { runBlocking { codes.verify(null, "010101", "coach") } }
+        assertThrows(LoginException::class.java) { runBlocking { codes.verify(null, "020202", "coach") } }
+        val afterLockout = codes.request("coach", resend = true)
+        assertTrue(afterLockout.deliveryDelaySeconds > 60)
+        assertEquals(afterLockout.challenge, codes.request("coach", resend = true).challenge)
+        assertNull(codes.nextDelivery())
+    }
+
+    @Test
     fun `attempt limits expiry and one time consumption survive new requests`() = runBlocking {
         val account = services.trainers.registerForWeb("coach", "Анна", "Тест")
         val links = services.telegramLinks

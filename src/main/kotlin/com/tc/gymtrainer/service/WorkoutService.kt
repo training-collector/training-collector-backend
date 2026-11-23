@@ -123,14 +123,20 @@ class WorkoutService(
     suspend fun chooseAnotherExercise(trainerId: Long, sessionId: Long) =
         advance(trainerId, sessionId, WorkoutStage.REVIEW) { WorkoutStage.CHOOSE_EXERCISE }
 
-    suspend fun finishWorkout(trainerId: Long, sessionId: Long): WorkoutDetail = dbQuery {
+    suspend fun cancelActiveWorkout(trainerId: Long, clientId: Long, sessionId: Long): Boolean = dbQuery {
+        requireOwnedClient(trainerId, clientId, lock = true)
+        workouts.deleteActiveSession(clientId, sessionId)
+    }
+
+    suspend fun finishWorkout(trainerId: Long, sessionId: Long, durationMin: Int? = null): WorkoutDetail = dbQuery {
         val session = requireSessionOwned(trainerId, sessionId, lock = true)
+        if (durationMin != null && durationMin <= 0) throw ValidationException("Введите положительное целое число минут.")
         if (session.stage != WorkoutStage.COMPLETED) {
             if (session.stage == WorkoutStage.ENTER_SETS) {
                 val last = workouts.listExercises(sessionId).last()
                 if (workouts.listSets(last.id).isEmpty()) workouts.deleteExercise(last.id)
             }
-            workouts.setStage(sessionId, WorkoutStage.COMPLETED)
+            workouts.setStage(sessionId, WorkoutStage.COMPLETED, durationMin)
         }
         checkNotNull(workouts.getDetail(sessionId))
     }

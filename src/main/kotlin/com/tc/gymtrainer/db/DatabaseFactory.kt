@@ -47,15 +47,8 @@ object DatabaseFactory {
         return HikariDataSource(hikari)
     }
 
-    // The original V1–V13 ledger stays available when adopting an existing installation.
-    internal fun migrationConfig() = Flyway.configure()
-        .locations("classpath:db/migration")
-        .table("training_schema_history")
-        .baselineOnMigrate(true)
-        .baselineVersion("0")
-
     private fun migrate(dataSource: DataSource) {
-        val result = migrationConfig().dataSource(dataSource).load().migrate()
+        val result = Flyway.configure().dataSource(dataSource).load().migrate()
         log.info("Flyway: применено миграций {}", result.migrationsExecuted)
     }
 }

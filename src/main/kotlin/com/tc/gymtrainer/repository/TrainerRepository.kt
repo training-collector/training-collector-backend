@@ -13,6 +13,7 @@ import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.insertAndGetId
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.update
+import org.jetbrains.exposed.sql.updateReturning
 import java.time.OffsetDateTime
 
 /**
@@ -82,6 +83,13 @@ class TrainerRepository {
 
     fun setTokenHash(id: Long, hash: String) =
         Trainers.update({ Trainers.id eq id }) { it[apiTokenHash] = hash }
+
+    fun updateName(id: Long, first: String, last: String): Trainer? =
+        Trainers.updateReturning(where = { (Trainers.id eq id) and Trainers.approvedAt.isNotNull() and Trainers.deactivatedAt.isNull() }) {
+            it[firstName] = first
+            it[lastName] = last
+            it[fullName] = "$first $last"
+        }.singleOrNull()?.toTrainer()
 
     fun replaceTokenHash(id: Long, currentHash: String, newHash: String) =
         Trainers.update({ (Trainers.id eq id) and (Trainers.apiTokenHash eq currentHash) }) { it[apiTokenHash] = newHash }

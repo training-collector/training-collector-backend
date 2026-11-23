@@ -188,9 +188,10 @@ class WorkoutRepository {
             .where { (WorkoutSessions.clientId eq clientId) and (WorkoutSessions.stage neq WorkoutStage.COMPLETED) }
             .singleOrNull()?.toWorkoutSession()
 
-    fun setStage(sessionId: Long, stage: WorkoutStage) {
+    fun setStage(sessionId: Long, stage: WorkoutStage, durationMin: Int? = null) {
         WorkoutSessions.update({ WorkoutSessions.id eq sessionId }) {
             it[WorkoutSessions.stage] = stage
+            if (durationMin != null) it[WorkoutSessions.durationMin] = durationMin
             it[updatedAt] = OffsetDateTime.now()
         }
     }
@@ -220,6 +221,12 @@ class WorkoutRepository {
     /** Удаление сессии каскадно удаляет упражнения и подходы (ON DELETE CASCADE). */
     fun deleteSession(id: Long): Boolean =
         WorkoutSessions.deleteWhere { with(it) { WorkoutSessions.id eq id } } > 0
+
+    fun deleteActiveSession(clientId: Long, sessionId: Long): Boolean =
+        WorkoutSessions.deleteWhere { with(it) {
+            (WorkoutSessions.id eq sessionId) and (WorkoutSessions.clientId eq clientId) and
+                (WorkoutSessions.stage neq WorkoutStage.COMPLETED)
+        } } > 0
 
     fun deleteExercise(id: Long): Boolean =
         WorkoutExercises.deleteWhere { with(it) { WorkoutExercises.id eq id } } > 0

@@ -32,12 +32,11 @@ abstract class AbstractDbTest {
 
     @BeforeEach
     fun cleanTransactionalData() {
-        // Оставляем общие группы мышц.
         transaction {
             exec(
                 """
                 TRUNCATE TABLE exercise_set, workout_exercise, workout_session,
-                               body_measurement, exercise_catalog, client, trainer, telegram_bot_identity, goal_catalog, admin_session
+                               body_measurement, exercise_catalog, muscle_group, client, trainer, telegram_bot_identity, goal_catalog, admin_session
                 RESTART IDENTITY CASCADE
                 """.trimIndent(),
             )

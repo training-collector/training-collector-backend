@@ -20,11 +20,12 @@ class CatalogServiceTest : AbstractDbTest() {
         assertThrows(ValidationException::class.java) { runBlocking { Services.client.create(trainer.id, "Борис", null, "Координация", null) } }
         catalog.deleteGoal(goal.id)
         assertEquals("Координация", Services.client.getOwned(trainer.id, client.id).goal)
-        val exercise = catalog.saveExercise(null, CatalogEdit("Выпады"))
-        assertThrows(ConflictException::class.java) { runBlocking { catalog.saveExercise(null, CatalogEdit("ВЫПАДЫ")) } }
-        catalog.saveExercise(exercise.id, CatalogEdit("Выпады", hidden = true))
+        val group = catalog.createMuscleGroup("Ноги")
+        val exercise = catalog.saveExercise(null, ExerciseEdit("Выпады", group.id))
+        assertThrows(ConflictException::class.java) { runBlocking { catalog.saveExercise(null, ExerciseEdit("ВЫПАДЫ", group.id)) } }
+        catalog.saveExercise(exercise.id, ExerciseEdit("Выпады", group.id, hidden = true))
         assertThrows(NotFoundException::class.java) { runBlocking { catalog.getExercise(exercise.id) } }
-        catalog.saveExercise(exercise.id, CatalogEdit("Выпады"))
+        catalog.saveExercise(exercise.id, ExerciseEdit("Выпады", group.id))
         assertEquals(exercise, catalog.getExercise(exercise.id))
         catalog.deleteExercise(exercise.id)
         assertTrue(catalog.exercises(includeHidden = true).isEmpty())

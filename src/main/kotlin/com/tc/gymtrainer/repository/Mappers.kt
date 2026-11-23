@@ -58,11 +58,12 @@ fun ResultRow.toClient() = Client(
 fun ResultRow.toMuscleGroup() = MuscleGroup(
     id = this[MuscleGroups.id].value,
     name = this[MuscleGroups.name],
+    description = this[MuscleGroups.description],
 )
 
 fun ResultRow.toExerciseCatalogItem() = ExerciseCatalogItem(
     id = this[ExerciseCatalog.id].value,
-    muscleGroupId = this[ExerciseCatalog.muscleGroupId]?.value,
+    muscleGroupId = this[ExerciseCatalog.muscleGroupId].value,
     name = this[ExerciseCatalog.name],
     description = this[ExerciseCatalog.description],
     hidden = this[ExerciseCatalog.hidden],

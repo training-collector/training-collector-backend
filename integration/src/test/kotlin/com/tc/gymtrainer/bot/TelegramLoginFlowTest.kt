@@ -104,11 +104,25 @@ class TelegramLoginFlowTest {
                         send(3, 456, command("/start", " login"), auth = true)
                         assertTrue(!authBot.deliverNext(authTelegram))
                         assertTrue(services.admin.trainers().isEmpty())
-                        assertTrue(send(4, 123, command("/start", payload), auth = true).text.contains("подтверждения администратора"))
+                        val pending = send(4, 123, command("/start", payload), auth = true).text
+                        assertTrue(pending.contains("подтверждения администратора"))
+                        assertTrue(pending.contains("Логин для входа: coach_local"))
+                        assertTrue(send(53, 123, command("/start"), auth = true).text.contains("Логин для входа: coach_local"))
                         assertEquals(account.trainer.id, services.admin.trainers().single().id)
                         assertTrue(!authBot.deliverNext(authTelegram))
+                        services.trainers.logout(account.token)
+                        services.loginCodes.request("coach_local")
                         services.admin.approve(account.trainer.id)
-                        val firstChallenge = services.loginCodes.request("coach_local").challenge
+                        suspend fun expectAccessNotice(active: Boolean) {
+                            assertTrue(authBot.deliverNextNotification(authTelegram))
+                            val msg = withTimeout(5000) { authTelegram.sent.receive() }
+                            assertEquals(123L.toChatId(), msg.chatId)
+                            assertEquals(if (active) "Аккаунт coach_local активирован. Доступ к кабинету открыт."
+                                else "Аккаунт coach_local деактивирован. Доступ к кабинету закрыт.", msg.text)
+                        }
+                        services.admin.approve(account.trainer.id)
+                        expectAccessNotice(true)
+                        assertFalse(authBot.deliverNextNotification(authTelegram))
                         withTimeout(5000) { while (!authBot.deliverNext(authTelegram)) delay(20) }
                         receiveHeading()
                         val code = receiveCode()
@@ -120,7 +134,7 @@ class TelegramLoginFlowTest {
                         assertTrue(conflict.text.contains("Этот аккаунт Telegram уже зарегистрирован"))
                         assertTrue(services.trainers.authenticate(duplicate.token)!!.signupTelegramInUse)
                         assertTrue(!authBot.deliverNext(authTelegram))
-                        val session = services.loginCodes.verify(firstChallenge, code)
+                        val session = services.loginCodes.verify(null, code, username = "coach_local")
                         val profile = session.trainer
                         assertEquals(account.trainer.id, profile.id)
                         assertEquals(123L, profile.telegramUserId)
@@ -156,16 +170,25 @@ class TelegramLoginFlowTest {
                         authTelegram.failNextCode = true
                         assertTrue(runCatching { authBot.deliverNext(authTelegram) }.exceptionOrNull() is java.io.IOException)
                         receiveHeading()
-                        DriverManager.getConnection(db.jdbcUrl, db.user, db.password).use { connection ->
+                        fun makeDeliveryDue(challenge: String) = DriverManager.getConnection(db.jdbcUrl, db.user, db.password).use { connection ->
                             connection.prepareStatement("UPDATE login_challenge SET next_delivery_at = now() WHERE challenge_id = ?").use {
-                                it.setString(1, next.challenge)
+                                it.setString(1, challenge)
                                 it.executeUpdate()
                             }
                         }
+                        makeDeliveryDue(next.challenge)
                         assertTrue(authBot.deliverNext(authTelegram))
                         val nextCode = receiveCode()
                         assertTrue(authTelegram.sent.tryReceive().isFailure)
-                        assertEquals(profile.id, services.loginCodes.verify(next.challenge, nextCode).trainer.id)
+                        val replacement = services.loginCodes.request("coach_local", resend = true)
+                        assertTrue(replacement.challenge != next.challenge)
+                        assertFalse(authBot.deliverNext(authTelegram))
+                        makeDeliveryDue(replacement.challenge)
+                        assertTrue(authBot.deliverNext(authTelegram))
+                        receiveHeading()
+                        val replacementCode = receiveCode()
+                        assertTrue(runCatching { services.loginCodes.verify(next.challenge, nextCode) }.isFailure)
+                        assertEquals(profile.id, services.loginCodes.verify(null, replacementCode, "coach_local").trainer.id)
                         assertTrue(press(50, "Добавить подопечного").text.contains("Имя нового"))
                         services.admin.deactivate(profile.id)
                         val revoked = press(51, "Анна")
@@ -174,6 +197,26 @@ class TelegramLoginFlowTest {
                         assertTrue(send(52, 123, command("/start"), auth = true).text.contains("деактивирован"))
                         services.loginCodes.request("coach_local")
                         assertFalse(authBot.deliverNext(authTelegram))
+                        // A worker stopped after claiming the event. Its lease expires after the account has been reactivated.
+                        val missed = auth.nextNotification()!!
+                        assertFalse(missed.active)
+                        services.admin.deactivate(profile.id)
+                        services.admin.reactivate(profile.id)
+                        services.admin.reactivate(profile.id)
+                        assertFalse(authBot.deliverNextNotification(authTelegram))
+                        DriverManager.getConnection(db.jdbcUrl, db.user, db.password).use { connection ->
+                            connection.prepareStatement("UPDATE trainer_access_notification SET next_attempt_at = now() WHERE id = ?").use {
+                                it.setLong(1, missed.id)
+                                assertEquals(1, it.executeUpdate())
+                            }
+                        }
+                        expectAccessNotice(false)
+                        expectAccessNotice(true)
+                        assertFalse(authBot.deliverNextNotification(authTelegram))
+                        services.loginCodes.request("coach_local")
+                        assertTrue(authBot.deliverNext(authTelegram))
+                        receiveHeading()
+                        assertEquals(profile.id, services.loginCodes.verify(null, receiveCode(), "coach_local").trainer.id)
                         assertTrue(telegram.sent.tryReceive().isFailure)
                     }
                 } finally {

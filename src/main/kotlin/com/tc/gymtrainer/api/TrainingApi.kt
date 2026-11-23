@@ -8,6 +8,7 @@ import com.fasterxml.jackson.module.kotlin.KotlinModule
 import com.tc.gymtrainer.TrainingServices
 import com.tc.gymtrainer.config.AdminAccess
 import com.tc.gymtrainer.service.AdminAuth
+import com.tc.gymtrainer.domain.ClientProfile
 import com.tc.gymtrainer.domain.ExerciseDraft
 import com.tc.gymtrainer.domain.MeasurementInput
 import com.tc.gymtrainer.domain.SetDraft
@@ -55,10 +56,31 @@ import java.time.OffsetDateTime
 import java.time.format.DateTimeParseException
 
 private data class TrainerInput(val username: String, val firstName: String, val lastName: String)
-private data class LoginInput(val username: String)
-private data class VerifyCodeInput(val challenge: String, val code: String)
+private data class TrainerNameInput(val firstName: String, val lastName: String)
+private data class LoginInput(val username: String, val resend: Boolean = false)
+private data class VerifyCodeInput(val code: String, val challenge: String? = null, val username: String? = null)
 private data class ReplaceTokenInput(val newToken: String)
-private data class ClientInput(val fullName: String, val phone: String? = null, val goal: String? = null, val notes: String? = null)
+private data class ClientInput(
+    val firstName: String? = null, val lastName: String? = null, val fullName: String? = null,
+    val goal: String? = null, val notes: String? = null,
+) {
+    private var phoneIncluded = false
+    var phone: String? = null
+        set(value) {
+            field = value
+            phoneIncluded = true
+        }
+
+    fun namedProfile(previous: ClientProfile? = null): ClientProfile {
+        if (firstName.isNullOrBlank()) throw ValidationException("Введите имя подопечного.")
+        return (previous ?: ClientProfile(firstName)).copy(firstName = firstName, lastName = lastName,
+            phone = if (phoneIncluded) phone else previous?.phone, goal = goal, notes = notes)
+    }
+    fun legacyName(): String? {
+        if (fullName != null && (firstName != null || lastName != null)) throw ValidationException("Передайте имя и фамилию отдельно.")
+        return fullName
+    }
+}
 private data class ExerciseInput(
     val muscleGroupId: Long? = null,
     val exerciseName: String? = null,
@@ -148,11 +170,11 @@ fun Application.trainingApi(services: TrainingServices, keys: BotAccess, admin: 
             }
             post("/auth/login") {
                 val input = call.receive<LoginInput>()
-                call.respond(services.loginCodes.request(input.username))
+                call.respond(services.loginCodes.request(input.username, input.resend))
             }
             post("/auth/login/verify") {
                 val input = call.receive<VerifyCodeInput>()
-                call.respond(services.loginCodes.verify(input.challenge, input.code))
+                call.respond(services.loginCodes.verify(input.challenge, input.code, input.username))
             }
             authenticate("trainer") {
                 get("/trainers/me") { call.respond(call.trainer) }
@@ -176,6 +198,10 @@ fun Application.trainingApi(services: TrainingServices, keys: BotAccess, admin: 
 }
 
 private fun Route.trainingRoutes(services: TrainingServices) {
+    put("/trainers/me") {
+        val name = call.receive<TrainerNameInput>()
+        call.respond(services.trainers.updateName(call.trainer.id, name.firstName, name.lastName))
+    }
     get("/trainers/me/bot-links") {
         call.respond(services.telegramLinks.profileLinks(call.trainer.trainingBotLinkedAt != null))
     }
@@ -215,7 +241,12 @@ internal fun Route.clientRoutes(clients: ClientService) {
         }
         post {
             val input = call.receive<ClientInput>()
-            val client = clients.create(call.trainer.id, input.fullName, input.phone, input.goal, input.notes)
+            val legacy = input.legacyName()
+            val client = if (legacy != null) clients.create(call.trainer.id, legacy, input.phone, input.goal, input.notes)
+                else {
+                    if (input.lastName.isNullOrBlank()) throw ValidationException("Введите фамилию подопечного.")
+                    clients.create(call.trainer.id, input.namedProfile())
+                }
             call.respond(HttpStatusCode.Created, client)
         }
         get("/{clientId}") { call.respond(clients.getOwned(call.trainer.id, call.id("clientId"))) }
@@ -227,7 +258,10 @@ internal fun Route.clientRoutes(clients: ClientService) {
         }
         put("/{clientId}") {
             val input = call.receive<ClientInput>()
-            val client = clients.update(call.trainer.id, call.id("clientId"), input.fullName, input.phone, input.goal, input.notes)
+            val id = call.id("clientId")
+            val legacy = input.legacyName()
+            val client = if (legacy != null) clients.update(call.trainer.id, id, legacy, input.phone, input.goal, input.notes)
+                else clients.updateProfile(call.trainer.id, id) { current -> input.namedProfile(current) }
             call.respond(client)
         }
     }

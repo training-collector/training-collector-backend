@@ -63,11 +63,12 @@ data class ClientProfile(
 data class MuscleGroup(
     val id: Long,
     val name: String,
+    val description: String? = null,
 )
 
 data class ExerciseCatalogItem(
     val id: Long,
-    val muscleGroupId: Long?,
+    val muscleGroupId: Long,
     val name: String,
     val description: String? = null,
     val hidden: Boolean = false,

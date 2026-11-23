@@ -3,6 +3,7 @@ package com.tc.gymtrainer.api
 import com.tc.gymtrainer.TrainingServices
 import com.tc.gymtrainer.service.AdminAuth
 import com.tc.gymtrainer.service.CatalogEdit
+import com.tc.gymtrainer.service.ExerciseEdit
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.auth.*
 import io.ktor.server.request.receive
@@ -10,6 +11,7 @@ import io.ktor.server.response.respond
 import io.ktor.server.routing.*
 
 private data class Login(val login: String, val password: String)
+private data class GroupInput(val name: String, val description: String? = null)
 
 internal fun Route.adminRoutes(services: TrainingServices, auth: AdminAuth) {
     route("/admin/v1") {
@@ -27,10 +29,21 @@ internal fun Route.adminRoutes(services: TrainingServices, auth: AdminAuth) {
             get("/trainers") { call.respond(services.admin.trainers()) }
             post("/trainers/{id}/approve") { services.admin.approve(call.id("id")); call.respond(HttpStatusCode.NoContent) }
             post("/trainers/{id}/deactivate") { services.admin.deactivate(call.id("id")); call.respond(HttpStatusCode.NoContent) }
+            post("/trainers/{id}/activate") { services.admin.reactivate(call.id("id")); call.respond(HttpStatusCode.NoContent) }
             delete("/trainers/{id}") { services.admin.deleteTrainer(call.id("id")); call.respond(HttpStatusCode.NoContent) }
             get("/exercises") { call.respond(services.catalog.exercises(includeHidden = true)) }
-            post("/exercises") { call.respond(HttpStatusCode.Created, services.catalog.saveExercise(null, call.receive<CatalogEdit>())) }
-            put("/exercises/{id}") { call.respond(services.catalog.saveExercise(call.id("id"), call.receive<CatalogEdit>())) }
+            get("/muscle-groups") { call.respond(services.catalog.listMuscleGroups()) }
+            get("/muscle-groups/{groupId}/exercises") { call.respond(services.catalog.exercises(call.id("groupId"), includeHidden = true)) }
+            post("/muscle-groups") {
+                val input = call.receive<GroupInput>()
+                call.respond(HttpStatusCode.Created, services.catalog.createMuscleGroup(input.name, input.description))
+            }
+            put("/muscle-groups/{id}") {
+                val input = call.receive<GroupInput>()
+                call.respond(services.catalog.saveMuscleGroup(call.id("id"), input.name, input.description))
+            }
+            post("/exercises") { call.respond(HttpStatusCode.Created, services.catalog.saveExercise(null, call.receive<ExerciseEdit>())) }
+            put("/exercises/{id}") { call.respond(services.catalog.saveExercise(call.id("id"), call.receive<ExerciseEdit>())) }
             delete("/exercises/{id}") { services.catalog.deleteExercise(call.id("id")); call.respond(HttpStatusCode.NoContent) }
             get("/goals") { call.respond(services.catalog.goals(includeHidden = true)) }
             post("/goals") { call.respond(HttpStatusCode.Created, services.catalog.saveGoal(null, call.receive<CatalogEdit>())) }
